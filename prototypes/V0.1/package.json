@@ -1,0 +1,12 @@
+{
+  "name": "dreamer-splat-viewer",
+  "version": "1.0.0",
+  "description": "Gaussian Splat Viewer with PlayCanvas SuperSplat",
+  "scripts": {
+    "build": "node build-viewer.mjs",
+    "postinstall": "node build-viewer.mjs"
+  },
+  "dependencies": {
+    "@playcanvas/supersplat-viewer": "^1.10.2"
+  }
+}

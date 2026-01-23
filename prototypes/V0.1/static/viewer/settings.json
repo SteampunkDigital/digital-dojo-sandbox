@@ -1,0 +1,9 @@
+{
+  "background": {
+    "color": [0.1, 0.1, 0.15, 1]
+  },
+  "camera": {
+    "fov": 60,
+    "startAnim": "none"
+  }
+}

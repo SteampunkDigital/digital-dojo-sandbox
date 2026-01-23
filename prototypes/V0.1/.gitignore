@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+
+# Media files (too large for git)
+media/*.ply
+
+# Python
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
