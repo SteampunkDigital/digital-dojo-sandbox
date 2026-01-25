@@ -76,6 +76,7 @@ def process_jobs(once: bool = False, batch_size: int = 100):
 
     logger.info(f"SD3.5 repo: {orchestrator.sd35_repo}")
     logger.info(f"SAM3D repo: {orchestrator.sam3d_repo}")
+    logger.info(f"Output format: {orchestrator.get_output_format()} (set OUTPUT_FORMAT env var to change)")
     logger.info("DYNAMIC MODE: Processing all jobs for current model before switching")
 
     poll_interval = 5  # seconds
@@ -186,50 +187,53 @@ def process_jobs(once: bool = False, batch_size: int = 100):
                 scene_id = job_data.get('scene_id')
                 node_id = job_data.get('node_id')
 
-                logger.info(f"=== SAM3D STAGE: Processing job {job_id} ===")
+                logger.info(f"=== 3D GENERATION STAGE: Processing job {job_id} ===")
 
                 if not image_path or not mask_path:
                     logger.error(f"  [{job_id}] Missing image_path or mask_path, marking failed")
                     db.update_job_status(job_id, "failed", error="Missing image or mask path")
                     continue
 
-                logger.info(f"  [{job_id}] Generating splat from {image_path}...")
+                # Get output format (splat or mesh) from environment
+                output_format = orchestrator.get_output_format()
+                logger.info(f"  [{job_id}] Generating {output_format} from {image_path}...")
 
                 try:
                     # Load SAM3D fresh for each job to prevent memory accumulation
                     orchestrator.load_sam3d()
-                    splat_path = orchestrator.generate_splat(image_path, mask_path)
-                    logger.info(f"  [{job_id}] Splat saved: {splat_path}")
+                    output_path = orchestrator.generate_3d(image_path, mask_path)
+                    logger.info(f"  [{job_id}] {output_format.capitalize()} saved: {output_path}")
 
                     # Mark completed
-                    db.update_job_status(job_id, "completed", output_path=splat_path)
+                    db.update_job_status(job_id, "completed", output_path=output_path)
 
                     # Register asset
                     db.register_asset(
-                        asset_type="splat",
-                        path=splat_path,
+                        asset_type=output_format,
+                        path=output_path,
                         scene_id=scene_id,
                         node_id=node_id,
                         metadata={
                             "prompt": prompt,
                             "image_path": image_path,
-                            "mask_path": mask_path
+                            "mask_path": mask_path,
+                            "output_format": output_format
                         }
                     )
 
                 except Exception as e:
-                    logger.error(f"  [{job_id}] Splat generation failed: {e}")
+                    logger.error(f"  [{job_id}] 3D generation failed: {e}")
                     db.update_job_status(job_id, "failed", error=str(e))
 
                 finally:
                     # ALWAYS unload SAM3D after each job to free memory
                     orchestrator.clear_gpu_memory()
-                    logger.info("SAM3D unloaded after job")
+                    logger.info("GPU memory cleared after 3D generation")
 
                 # Check for more jobs (will reload SAM3D on next iteration)
-                more_splats = db.count_jobs_by_stage("needs_splat")
-                if more_splats > 0:
-                    logger.info(f"  {more_splats} more splat jobs remaining...")
+                more_3d_jobs = db.count_jobs_by_stage("needs_splat")
+                if more_3d_jobs > 0:
+                    logger.info(f"  {more_3d_jobs} more 3D generation jobs remaining...")
                 continue
 
             # ========== No jobs at any stage ==========

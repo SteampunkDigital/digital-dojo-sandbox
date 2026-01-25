@@ -503,16 +503,19 @@ def api_list_jobs():
 
 @app.route('/api/assets', methods=['GET'])
 def api_list_assets():
-    """List generated assets (splats, images)"""
+    """List generated assets (splats, meshes, images)"""
     db = get_db()
     if not db:
         return jsonify({"error": "Database not available", "assets": []})
 
     scene_id = request.args.get('scene_id')
-    asset_type = request.args.get('type', 'splat')
+    asset_type = request.args.get('type', 'all')  # Default to 'all' for both splat and mesh
 
     if scene_id:
         assets = db.get_assets_for_scene(scene_id)
+    elif asset_type == 'all':
+        # Get both splat and mesh assets (3D assets)
+        assets = list(db.assets.find({"type": {"$in": ["splat", "mesh"]}}).sort("created_at", -1).limit(50))
     else:
         # Get all assets of the specified type
         assets = list(db.assets.find({"type": asset_type}).sort("created_at", -1).limit(50))

@@ -74,8 +74,8 @@ User writes prose → Ollama extracts scene graph → MongoDB stores → SD/SAM3
 **GPU Pipeline (single RTX 4090):**
 - Models loaded/unloaded sequentially to fit in 24GB VRAM
 - Ollama runs separately (manages own memory via `keep_alive`)
-- Pipeline: LLM parse → SD3.5 image → rembg (background removal) → SAM3D splat
-- rembg runs on CPU (~200MB model) to create alpha mask for SAM3D
+- Pipeline: LLM parse → SD3.5 image → SAM (segmentation) → SAM3D (splat or mesh)
+- Output format configurable via `OUTPUT_FORMAT` env var (splat = .ply, mesh = .glb)
 
 **External Repos (integrated via sys.path):**
 - `sd3.5/` - SD3.5 inference (`SD3Inferencer` class)
@@ -97,10 +97,13 @@ SD35_REPO_PATH=c:/Users/david/Documents/GitHub/sd3.5
 SD35_MODEL=sd3.5_medium.safetensors
 SAM3D_REPO_PATH=c:/Users/david/Documents/GitHub/sam-3d-objects
 
+# Output Format (splat or mesh)
+OUTPUT_FORMAT=splat
+
 # Flask
 FLASK_PORT=5000
 ```
 
 ## Media Files
 
-Place `.ply` files in `media/` directory. Generated assets go to `media/generated/`.
+Place `.ply` (splat) or `.glb` (mesh) files in `media/` directory. Generated assets go to `media/generated/`.

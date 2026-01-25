@@ -204,8 +204,8 @@
         <div class="pane" id="rightPane" style="flex: 1;">
             <div class="pane-header">
                 <span>3D Viewer</span>
-                <select id="splatSelect" onchange="loadSelectedSplat()" style="background: #3c3c3c; color: #ccc; border: 1px solid #555; padding: 2px 8px; border-radius: 3px; font-size: 11px;">
-                    <option value="">Select a splat...</option>
+                <select id="splatSelect" onchange="loadSelectedAsset()" style="background: #3c3c3c; color: #ccc; border: 1px solid #555; padding: 2px 8px; border-radius: 3px; font-size: 11px;">
+                    <option value="">Select asset...</option>
                 </select>
             </div>
             <iframe id="viewerFrame" src="/supersplat"></iframe>
@@ -431,32 +431,34 @@
             setStatus('processing', 'Loading assets...');
 
             try {
-                const response = await fetch('/api/assets?type=splat');
+                // Load all 3D assets (both splat and mesh)
+                const response = await fetch('/api/assets');
                 const data = await response.json();
 
                 if (data.success && data.assets.length > 0) {
-                    console.log(`Found ${data.assets.length} splat assets`);
+                    console.log(`Found ${data.assets.length} 3D assets`);
                     availableAssets = data.assets;
 
-                    // Populate dropdown
-                    splatSelect.innerHTML = '<option value="">Select a splat (' + data.assets.length + ' available)...</option>';
+                    // Populate dropdown with type indicator
+                    splatSelect.innerHTML = '<option value="">Select asset (' + data.assets.length + ' available)...</option>';
                     data.assets.forEach((asset, index) => {
                         const option = document.createElement('option');
                         option.value = index;
+                        const assetType = asset.type === 'mesh' ? '[GLB]' : '[PLY]';
                         const prompt = asset.metadata?.prompt || 'Unknown';
-                        const shortPrompt = prompt.length > 40 ? prompt.substring(0, 40) + '...' : prompt;
-                        option.textContent = shortPrompt;
+                        const shortPrompt = prompt.length > 35 ? prompt.substring(0, 35) + '...' : prompt;
+                        option.textContent = `${assetType} ${shortPrompt}`;
                         splatSelect.appendChild(option);
                     });
 
                     // Auto-load the most recent one
                     splatSelect.value = '0';
-                    loadSelectedSplat();
+                    loadSelectedAsset();
 
-                    setStatus('connected', `${data.assets.length} splats available`);
+                    setStatus('connected', `${data.assets.length} assets available`);
                 } else {
-                    setStatus('connected', 'No splat assets found');
-                    splatSelect.innerHTML = '<option value="">No splats available</option>';
+                    setStatus('connected', 'No 3D assets found');
+                    splatSelect.innerHTML = '<option value="">No assets available</option>';
                 }
             } catch (e) {
                 console.error('Failed to load assets:', e);
@@ -464,20 +466,27 @@
             }
         }
 
-        function loadSelectedSplat() {
+        function loadSelectedAsset() {
             const index = splatSelect.value;
             if (index === '' || !availableAssets[index]) return;
 
             const asset = availableAssets[index];
             const webPath = pathToWebPath(asset.path);
+            const isMesh = asset.type === 'mesh' || asset.path.endsWith('.glb');
 
-            console.log(`Loading splat from: ${webPath}`);
-            viewerFrame.src = `/static/viewer/index.html?content=${encodeURIComponent(webPath)}&noui`;
+            // Choose viewer based on file type
+            const viewerPage = isMesh ? 'mesh.html' : 'index.html';
+            console.log(`Loading ${isMesh ? 'mesh' : 'splat'} from: ${webPath}`);
+            viewerFrame.src = `/static/viewer/${viewerPage}?content=${encodeURIComponent(webPath)}&noui`;
 
-            const prompt = asset.metadata?.prompt || 'splat';
+            const prompt = asset.metadata?.prompt || (isMesh ? 'mesh' : 'splat');
             const shortPrompt = prompt.length > 30 ? prompt.substring(0, 30) + '...' : prompt;
-            setStatus('connected', `Viewing: ${shortPrompt}`);
+            const typeLabel = isMesh ? 'Mesh' : 'Splat';
+            setStatus('connected', `${typeLabel}: ${shortPrompt}`);
         }
+
+        // Alias for backward compatibility
+        function loadSelectedSplat() { loadSelectedAsset(); }
 
         async function mergeScene() {
             if (!currentScene) {

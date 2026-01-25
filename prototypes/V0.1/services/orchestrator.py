@@ -557,6 +557,139 @@ class GPUOrchestrator:
         logger.info(f"VRAM after cleanup: {self.get_vram_usage()}")
         return str(output_path)
 
+    def generate_mesh(self, image_path: str, mask_path: str,
+                      seed: int = 42) -> str:
+        """
+        Generate GLB mesh from image + mask using SAM3D with mesh postprocessing.
+        Returns path to generated .glb file.
+
+        Args:
+            image_path: Path to input image (PNG)
+            mask_path: Path to mask image (required)
+            seed: Random seed for reproducibility
+        """
+        if not mask_path:
+            raise ValueError("mask_path is required. Use generate_mask() first.")
+
+        logger.info(f"Generating mesh from: {image_path} with mask: {mask_path}")
+
+        # Load image and mask
+        image = Image.open(image_path)
+        mask = Image.open(mask_path).convert('L')
+        mask = np.array(mask)
+
+        # Convert to boolean mask
+        mask = mask > 127
+        fg_pixels = np.sum(mask)
+        logger.info(f"Boolean mask: dtype={mask.dtype}, fg_pixels={fg_pixels} ({100*fg_pixels/mask.size:.1f}%)")
+
+        if fg_pixels == 0:
+            raise ValueError("Mask has no foreground pixels - SAM may have failed to segment the object")
+
+        # Load SAM3D
+        self.load_sam3d()
+
+        # Convert image to numpy array (RGB)
+        if image.mode == 'RGBA':
+            image = image.convert('RGB')
+        image_np = np.array(image)
+
+        # Merge mask to RGBA for SAM3D
+        rgba_image = self.model_instance.merge_mask_to_rgba(image_np, mask)
+
+        # Run SAM3D pipeline with mesh postprocessing enabled
+        logger.info(f"Running SAM3D inference with mesh generation (seed={seed})...")
+        logger.info(f"VRAM before inference: {self.get_vram_usage()}")
+
+        # Use vertex colors directly (texture baking requires diff-gaussian-rasterization
+        # which has complex build requirements). SAM3D's to_glb only applies vertex colors
+        # when with_mesh_postprocess=False and with_texture_baking=False.
+        logger.info("Running SAM3D with vertex colors (no texture baking)")
+        try:
+            output = self.model_instance._pipeline.run(
+                rgba_image,
+                None,
+                seed,
+                stage1_only=False,
+                with_mesh_postprocess=False,  # Must be False for vertex colors to work
+                with_texture_baking=False,
+                with_layout_postprocess=False,
+                use_vertex_color=True,  # Enable vertex colors
+                stage1_inference_steps=None,
+                pointmap=None,
+            )
+        except Exception as e:
+            logger.error(f"SAM3D mesh inference failed: {e}")
+            raise
+
+        # Save the GLB mesh
+        glb = output.get("glb")
+        if glb is None:
+            raise RuntimeError("SAM3D did not return mesh output - check with_mesh_postprocess")
+
+        # Debug: Check if mesh has vertex colors
+        if hasattr(glb, 'visual') and hasattr(glb.visual, 'vertex_colors'):
+            vc = glb.visual.vertex_colors
+            if vc is not None:
+                logger.info(f"Mesh has vertex colors: shape={vc.shape}, dtype={vc.dtype}, "
+                           f"min={vc.min()}, max={vc.max()}")
+            else:
+                logger.warning("Mesh visual.vertex_colors is None")
+        else:
+            logger.warning("Mesh does not have vertex_colors attribute")
+
+        # Ensure vertex colors are properly formatted for GLB export
+        # trimesh expects RGBA uint8 [0-255] for best GLB compatibility
+        if hasattr(glb, 'visual') and glb.visual is not None:
+            if hasattr(glb.visual, 'vertex_colors') and glb.visual.vertex_colors is not None:
+                vc = glb.visual.vertex_colors
+                # Check if colors are in float [0-1] range and need conversion
+                if vc.dtype in [np.float32, np.float64]:
+                    if vc.max() <= 1.0:
+                        # Convert from [0, 1] float to [0, 255] uint8
+                        vc_uint8 = (vc * 255).astype(np.uint8)
+                        # Ensure RGBA (add alpha if needed)
+                        if vc_uint8.shape[1] == 3:
+                            alpha = np.full((vc_uint8.shape[0], 1), 255, dtype=np.uint8)
+                            vc_uint8 = np.concatenate([vc_uint8, alpha], axis=1)
+                        glb.visual.vertex_colors = vc_uint8
+                        logger.info(f"Converted vertex colors to uint8 RGBA: shape={vc_uint8.shape}")
+
+        output_path = self.output_dir / f"mesh_{uuid.uuid4().hex[:8]}.glb"
+        glb.export(str(output_path))
+
+        # Cleanup
+        del output
+        del image_np
+        del mask
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
+        logger.info(f"Mesh saved: {output_path}")
+        logger.info(f"VRAM after cleanup: {self.get_vram_usage()}")
+        return str(output_path)
+
+    @staticmethod
+    def get_output_format() -> str:
+        """Get the configured output format (splat or mesh)"""
+        return os.getenv("OUTPUT_FORMAT", "splat").lower()
+
+    def generate_3d(self, image_path: str, mask_path: str, seed: int = 42) -> str:
+        """
+        Generate 3D output (splat or mesh) based on OUTPUT_FORMAT setting.
+
+        Returns path to generated file (.ply for splat, .glb for mesh).
+        """
+        output_format = self.get_output_format()
+        logger.info(f"Output format: {output_format}")
+
+        if output_format == "mesh":
+            return self.generate_mesh(image_path, mask_path, seed)
+        else:
+            return self.generate_splat(image_path, mask_path, seed)
+
     # ==================== Pipeline ====================
 
     def run_pipeline(self, job: GenerationJob) -> GenerationJob:
