@@ -38,8 +38,9 @@
             const contentUrl = url.searchParams.get('content') || './mesh.glb';
 
             // Rotation parameter: accepts "x,y,z" degrees
-            // Default: 90 X (Z-up to Y-up) for SAM3D coordinate system
-            const rotationParam = url.searchParams.get('rotation') || '90,0,0';
+            // Default: 0,0,180 - SAM3D's to_glb already converts Z-up to Y-up internally,
+            // so we only need the 180 Z rotation to match splat viewer facing direction
+            const rotationParam = url.searchParams.get('rotation') || '0,0,180';
             const [rotX, rotY, rotZ] = rotationParam.split(',').map(Number);
             console.log(`Rotation: (${rotX}, ${rotY}, ${rotZ})`);
 
@@ -192,7 +193,7 @@
                     asset.ready(() => {
                         const entity = asset.resource.instantiateRenderEntity();
 
-                        // Apply rotation (Z-up to Y-up conversion)
+                        // Apply rotation (SAM3D GLB is already Y-up, just need facing correction)
                         entity.setLocalEulerAngles(rotX, rotY, rotZ);
 
                         app.root.addChild(entity);
