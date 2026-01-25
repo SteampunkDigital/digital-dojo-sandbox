@@ -191,6 +191,116 @@ class DatabaseService:
         """Get a job by ID"""
         return self.jobs.find_one({"_id": job_id})
 
+    def reset_failed_jobs(self, reset_to_stage: str = "needs_splat") -> int:
+        """
+        Reset all failed jobs to retry them.
+
+        Args:
+            reset_to_stage: Stage to reset to. Options:
+              - "pending" = restart from image generation
+              - "needs_mask" = restart from mask generation (keep image)
+              - "needs_splat" = restart from splat generation (keep image + mask)
+
+        Returns:
+            Number of jobs reset
+        """
+        # Find all failed jobs
+        failed_jobs = list(self.jobs.find({"status": "failed"}))
+
+        reset_count = 0
+        for job in failed_jobs:
+            # Determine what stage to reset to based on what we have
+            if reset_to_stage == "pending":
+                # Full restart
+                new_status = "pending"
+            elif reset_to_stage == "needs_mask":
+                # Restart from mask generation if we have an image
+                if job.get("image_path"):
+                    new_status = "needs_mask"
+                else:
+                    new_status = "pending"
+            else:  # needs_splat
+                # Restart from splat generation if we have image + mask
+                if job.get("image_path") and job.get("mask_path"):
+                    new_status = "needs_splat"
+                elif job.get("image_path"):
+                    new_status = "needs_mask"
+                else:
+                    new_status = "pending"
+
+            # Reset the job
+            self.jobs.update_one(
+                {"_id": job["_id"]},
+                {"$set": {
+                    "status": new_status,
+                    "error": None,
+                    "completed_at": None
+                }}
+            )
+            reset_count += 1
+            logger.info(f"Reset job {job['_id']} from failed to {new_status}")
+
+        return reset_count
+
+    def get_failed_jobs(self) -> List[Dict[str, Any]]:
+        """Get all failed jobs"""
+        return list(self.jobs.find({"status": "failed"}))
+
+    def reset_all_jobs(self, reset_to_stage: str = "needs_splat") -> int:
+        """
+        Reset ALL jobs (including completed) to retry them.
+
+        Args:
+            reset_to_stage: Stage to reset to. Options:
+              - "pending" = restart from image generation
+              - "needs_mask" = restart from mask generation (keep image)
+              - "needs_splat" = restart from splat generation (keep image + mask)
+
+        Returns:
+            Number of jobs reset
+        """
+        # Find all jobs that aren't already at the target stage
+        all_jobs = list(self.jobs.find({
+            "status": {"$nin": ["pending", "needs_mask", "needs_splat"]}
+        }))
+
+        reset_count = 0
+        for job in all_jobs:
+            # Determine what stage to reset to based on what we have
+            if reset_to_stage == "pending":
+                new_status = "pending"
+            elif reset_to_stage == "needs_mask":
+                if job.get("image_path"):
+                    new_status = "needs_mask"
+                else:
+                    new_status = "pending"
+            else:  # needs_splat
+                if job.get("image_path") and job.get("mask_path"):
+                    new_status = "needs_splat"
+                elif job.get("image_path"):
+                    new_status = "needs_mask"
+                else:
+                    new_status = "pending"
+
+            self.jobs.update_one(
+                {"_id": job["_id"]},
+                {"$set": {
+                    "status": new_status,
+                    "error": None,
+                    "completed_at": None,
+                    "output_path": None
+                }}
+            )
+            reset_count += 1
+            logger.info(f"Reset job {job['_id']} to {new_status}")
+
+        return reset_count
+
+    def clear_all_jobs(self) -> int:
+        """Delete all jobs (use with caution)"""
+        result = self.jobs.delete_many({})
+        return result.deleted_count
+
     # Asset operations
 
     def register_asset(self, asset_type: str, path: str,

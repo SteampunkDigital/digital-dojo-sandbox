@@ -174,77 +174,78 @@ def process_jobs(once: bool = False, batch_size: int = 100):
                 logger.info("SAM unloaded - no more mask jobs")
 
             # ========== Check for jobs needing SAM3D (splat generation) ==========
-            splat_jobs = db.get_jobs_by_stage("needs_splat", limit=batch_size)
+            # Process ONE job at a time to prevent memory accumulation
+            splat_jobs = db.get_jobs_by_stage("needs_splat", limit=1)
 
             if splat_jobs:
-                logger.info(f"=== SAM3D STAGE: {len(splat_jobs)} jobs need splats ===")
-                orchestrator.load_sam3d()
+                job_data = splat_jobs[0]
+                job_id = job_data['_id']
+                image_path = job_data.get('image_path')
+                mask_path = job_data.get('mask_path')
+                prompt = job_data.get('prompt', '')
+                scene_id = job_data.get('scene_id')
+                node_id = job_data.get('node_id')
 
-                for job_data in splat_jobs:
-                    job_id = job_data['_id']
-                    image_path = job_data.get('image_path')
-                    mask_path = job_data.get('mask_path')
-                    prompt = job_data.get('prompt', '')
-                    scene_id = job_data.get('scene_id')
-                    node_id = job_data.get('node_id')
+                logger.info(f"=== SAM3D STAGE: Processing job {job_id} ===")
 
-                    if not image_path or not mask_path:
-                        logger.error(f"  [{job_id}] Missing image_path or mask_path, marking failed")
-                        db.update_job_status(job_id, "failed", error="Missing image or mask path")
-                        continue
+                if not image_path or not mask_path:
+                    logger.error(f"  [{job_id}] Missing image_path or mask_path, marking failed")
+                    db.update_job_status(job_id, "failed", error="Missing image or mask path")
+                    continue
 
-                    logger.info(f"  [{job_id}] Generating splat from {image_path}...")
+                logger.info(f"  [{job_id}] Generating splat from {image_path}...")
 
-                    try:
-                        splat_path = orchestrator.generate_splat(image_path, mask_path)
-                        logger.info(f"  [{job_id}] Splat saved: {splat_path}")
+                try:
+                    # Load SAM3D fresh for each job to prevent memory accumulation
+                    orchestrator.load_sam3d()
+                    splat_path = orchestrator.generate_splat(image_path, mask_path)
+                    logger.info(f"  [{job_id}] Splat saved: {splat_path}")
 
-                        # Mark completed
-                        db.update_job_status(job_id, "completed", output_path=splat_path)
+                    # Mark completed
+                    db.update_job_status(job_id, "completed", output_path=splat_path)
 
-                        # Register asset
-                        db.register_asset(
-                            asset_type="splat",
-                            path=splat_path,
-                            scene_id=scene_id,
-                            node_id=node_id,
-                            metadata={
-                                "prompt": prompt,
-                                "image_path": image_path,
-                                "mask_path": mask_path
-                            }
-                        )
+                    # Register asset
+                    db.register_asset(
+                        asset_type="splat",
+                        path=splat_path,
+                        scene_id=scene_id,
+                        node_id=node_id,
+                        metadata={
+                            "prompt": prompt,
+                            "image_path": image_path,
+                            "mask_path": mask_path
+                        }
+                    )
 
-                    except Exception as e:
-                        logger.error(f"  [{job_id}] Splat generation failed: {e}")
-                        db.update_job_status(job_id, "failed", error=str(e))
+                except Exception as e:
+                    logger.error(f"  [{job_id}] Splat generation failed: {e}")
+                    db.update_job_status(job_id, "failed", error=str(e))
 
-                # Check if more splat jobs or higher-priority jobs arrived
-                more_splats = db.count_jobs_by_stage("needs_splat")
-                new_pending = db.count_jobs_by_stage("pending")
-                new_masks = db.count_jobs_by_stage("needs_mask")
-
-                if more_splats > 0 and new_pending == 0 and new_masks == 0:
-                    logger.info(f"  {more_splats} more splat jobs, continuing SAM3D...")
-                    continue  # Stay on SAM3D
-                elif new_pending > 0 or new_masks > 0:
-                    logger.info(f"  Higher priority jobs waiting, switching...")
+                finally:
+                    # ALWAYS unload SAM3D after each job to free memory
                     orchestrator.clear_gpu_memory()
-                    continue  # Switch to earlier stage
+                    logger.info("SAM3D unloaded after job")
 
-                # No more jobs, unload SAM3D
-                orchestrator.clear_gpu_memory()
-                logger.info("SAM3D unloaded - no more splat jobs")
+                # Check for more jobs (will reload SAM3D on next iteration)
+                more_splats = db.count_jobs_by_stage("needs_splat")
+                if more_splats > 0:
+                    logger.info(f"  {more_splats} more splat jobs remaining...")
+                continue
 
             # ========== No jobs at any stage ==========
             if not pending_jobs and not mask_jobs and not splat_jobs:
+                # Log stats at INFO level so user can see them
+                completed = db.count_jobs_by_stage("completed")
+                failed = db.count_jobs_by_stage("failed")
+
+                if failed > 0:
+                    logger.warning(f"No active jobs. {failed} jobs failed, {completed} completed.")
+                    logger.warning("Failed jobs will not be retried. Check logs above for errors.")
+
                 if once:
                     logger.info("No jobs to process. Exiting (--once mode)")
                     break
 
-                # Log stats
-                completed = db.count_jobs_by_stage("completed")
-                failed = db.count_jobs_by_stage("failed")
                 logger.debug(f"Waiting for jobs... (completed: {completed}, failed: {failed})")
                 time.sleep(poll_interval)
 

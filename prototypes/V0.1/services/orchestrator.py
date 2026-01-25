@@ -270,11 +270,82 @@ class GPUOrchestrator:
                 "Download from: https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth"
             )
 
+    def _find_foreground_point(self, image_np: np.ndarray, num_samples: int = 100) -> tuple:
+        """
+        Find a point likely to be on the foreground object.
+
+        Strategy:
+        1. Sample edge pixels to estimate background color
+        2. Sample random points across the image
+        3. Find points that differ significantly from background
+        4. Return the point closest to center among non-background points
+
+        Args:
+            image_np: RGB image as numpy array (H, W, 3)
+            num_samples: Number of random points to sample
+
+        Returns:
+            (x, y) coordinates of a likely foreground point
+        """
+        h, w = image_np.shape[:2]
+
+        # Sample edge pixels to estimate background color
+        # Take pixels from the borders (likely background for centered objects)
+        edge_pixels = []
+        border = 20  # pixels from edge
+        # Top edge
+        edge_pixels.extend(image_np[:border, :, :].reshape(-1, 3).tolist())
+        # Bottom edge
+        edge_pixels.extend(image_np[-border:, :, :].reshape(-1, 3).tolist())
+        # Left edge
+        edge_pixels.extend(image_np[:, :border, :].reshape(-1, 3).tolist())
+        # Right edge
+        edge_pixels.extend(image_np[:, -border:, :].reshape(-1, 3).tolist())
+
+        edge_pixels = np.array(edge_pixels)
+        bg_color = np.median(edge_pixels, axis=0)  # median is robust to outliers
+        logger.info(f"Estimated background color: RGB{tuple(bg_color.astype(int))}")
+
+        # Sample random points across the central region of the image
+        # Avoid edges where background is more likely
+        margin = int(min(h, w) * 0.1)  # 10% margin
+        np.random.seed(42)  # reproducible
+        sample_y = np.random.randint(margin, h - margin, num_samples)
+        sample_x = np.random.randint(margin, w - margin, num_samples)
+
+        # Calculate color distance from background for each sample
+        candidates = []
+        for x, y in zip(sample_x, sample_y):
+            pixel_color = image_np[y, x, :]
+            # Euclidean distance in RGB space
+            color_dist = np.sqrt(np.sum((pixel_color.astype(float) - bg_color) ** 2))
+            # Distance from center (prefer points closer to center)
+            center_dist = np.sqrt((x - w/2)**2 + (y - h/2)**2)
+            candidates.append((x, y, color_dist, center_dist))
+
+        # Filter to points that are significantly different from background
+        # Threshold: at least 50 units away in RGB space (out of 441 max)
+        bg_threshold = 50
+        foreground_candidates = [(x, y, cd, center_d) for x, y, cd, center_d in candidates if cd > bg_threshold]
+
+        if foreground_candidates:
+            # Sort by distance from center (prefer centered points)
+            foreground_candidates.sort(key=lambda p: p[3])
+            best = foreground_candidates[0]
+            logger.info(f"Found foreground point at ({best[0]}, {best[1]}) with color_dist={best[2]:.1f}")
+            return (best[0], best[1])
+        else:
+            # Fallback to center if no good candidates found
+            logger.warning("No clear foreground points found, using center")
+            return (w // 2, h // 2)
+
     def segment_with_sam(self, image: Image.Image) -> np.ndarray:
         """
-        Segment the main object in an image using SAM with center-point prompting.
+        Segment the main object in an image using SAM with intelligent point prompting.
 
-        Assumes the object is centered in the image (which our SD3.5 prompts ensure).
+        Uses background color estimation to find a likely foreground point,
+        rather than assuming the object is perfectly centered.
+
         Returns a binary mask where 255 = object, 0 = background.
         """
         self.load_sam()
@@ -285,14 +356,17 @@ class GPUOrchestrator:
         # Set image for SAM
         self._sam_predictor.set_image(image_np)
 
-        # Use center point as prompt (object should be centered)
+        # Find a good foreground point using color analysis
         h, w = image_np.shape[:2]
-        center_point = np.array([[w // 2, h // 2]])
+        fg_x, fg_y = self._find_foreground_point(image_np)
+        prompt_point = np.array([[fg_x, fg_y]])
         point_labels = np.array([1])  # 1 = foreground
+
+        logger.info(f"SAM prompt point: ({fg_x}, {fg_y}) in {w}x{h} image")
 
         # Get mask prediction
         masks, scores, _ = self._sam_predictor.predict(
-            point_coords=center_point,
+            point_coords=prompt_point,
             point_labels=point_labels,
             multimask_output=True
         )
@@ -405,6 +479,25 @@ class GPUOrchestrator:
         mask = Image.open(mask_path).convert('L')
         mask = np.array(mask)
 
+        # Debug: log mask stats before conversion
+        fg_pixels_before = np.sum(mask > 0)
+        logger.info(f"Mask loaded: shape={mask.shape}, dtype={mask.dtype}, "
+                    f"min={mask.min()}, max={mask.max()}, "
+                    f"fg_pixels={fg_pixels_before} ({100*fg_pixels_before/mask.size:.1f}%)")
+
+        # Convert to boolean mask - SAM3D expects boolean, not uint8!
+        # (see sam-3d-objects/notebook/inference.py load_mask function)
+        mask = mask > 127  # Returns boolean array (True/False)
+        fg_pixels = np.sum(mask)
+        logger.info(f"Boolean mask: dtype={mask.dtype}, fg_pixels={fg_pixels} ({100*fg_pixels/mask.size:.1f}%)")
+
+        # Sanity check: mask should have some foreground
+        if fg_pixels == 0:
+            raise ValueError("Mask has no foreground pixels - SAM may have failed to segment the object")
+
+        if fg_pixels < 100:
+            logger.warning(f"Mask has very few foreground pixels ({fg_pixels}), splat quality may be poor")
+
         # Load SAM3D for splat generation
         self.load_sam3d()
 
@@ -413,15 +506,76 @@ class GPUOrchestrator:
             image = image.convert('RGB')
         image_np = np.array(image)
 
+        # Debug: log image stats
+        logger.info(f"Image: shape={image_np.shape}, dtype={image_np.dtype}")
+
+        # Verify dimensions match
+        if mask.shape[:2] != image_np.shape[:2]:
+            raise ValueError(f"Mask shape {mask.shape} doesn't match image shape {image_np.shape[:2]}")
+
         # Run SAM3D inference
-        output = self.model_instance(image_np, mask, seed=seed)
+        logger.info(f"Running SAM3D inference (seed={seed})...")
+        logger.info(f"VRAM before inference: {self.get_vram_usage()}")
+        try:
+            output = self.model_instance(image_np, mask, seed=seed)
+        except Exception as e:
+            logger.error(f"SAM3D inference failed: {e}")
+            logger.error(f"  Image shape: {image_np.shape}, dtype: {image_np.dtype}")
+            logger.error(f"  Mask shape: {mask.shape}, dtype: {mask.dtype}, fg: {fg_pixels}")
+            raise
+
+        # Fix coordinate system alignment (SAM3D uses Z-up, viewers use Y-up)
+        # Transformation: X' = -X, Y' = Z, Z' = Y (swap Y/Z, flip X)
+        gs = output["gs"]
+        self._fix_gaussian_alignment(gs)
 
         # Save the gaussian splat
         output_path = self.output_dir / f"splat_{uuid.uuid4().hex[:8]}.ply"
-        output["gs"].save_ply(str(output_path))
+        gs.save_ply(str(output_path))
+
+        # Aggressive cleanup to prevent memory accumulation across jobs
+        del output
+        del image_np
+        del mask
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
 
         logger.info(f"Splat saved: {output_path}")
+        logger.info(f"VRAM after cleanup: {self.get_vram_usage()}")
         return str(output_path)
+
+    def _fix_gaussian_alignment(self, gs):
+        """
+        Fix coordinate system alignment for the viewer.
+
+        SAM3D outputs in Z-up coordinate system (common in CV/depth estimation),
+        but WebGL/Three.js viewers expect Y-up.
+
+        Transformation matrix (applied to xyz positions):
+          X' = -X  (flip X)
+          Y' = -Z  (old Z becomes new Y, negated to flip upright)
+          Z' = Y   (old Y becomes new Z)
+        """
+        device = gs._xyz.device
+        dtype = gs._xyz.dtype
+
+        # Transformation matrix with Y flipped to correct upside-down issue
+        transform = torch.tensor(
+            [
+                [-1, 0, 0],
+                [0, 0, -1],  # negate Z->Y to flip upright
+                [0, 1, 0],
+            ],
+            device=device,
+            dtype=dtype,
+        )
+
+        # Apply transformation to positions
+        gs._xyz = gs._xyz @ transform.T
+
+        logger.info("Applied Z-up to Y-up coordinate transformation (with Y flip)")
 
     # ==================== Pipeline ====================
 
