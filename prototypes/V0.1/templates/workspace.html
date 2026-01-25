@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Digital Dojo - Workspace</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html, body {
+            height: 100%;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1e1e1e;
+        }
+
+        .toolbar {
+            height: 48px;
+            background: #2d2d2d;
+            border-bottom: 1px solid #404040;
+            display: flex;
+            align-items: center;
+            padding: 0 16px;
+            gap: 12px;
+        }
+
+        .toolbar h1 {
+            font-size: 14px;
+            font-weight: 500;
+            color: #ccc;
+        }
+
+        .toolbar-spacer {
+            flex: 1;
+        }
+
+        .toolbar button {
+            padding: 8px 16px;
+            background: #0e639c;
+            border: none;
+            border-radius: 4px;
+            color: white;
+            font-size: 13px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            transition: background 0.15s;
+        }
+
+        .toolbar button:hover {
+            background: #1177bb;
+        }
+
+        .toolbar button:disabled {
+            background: #404040;
+            cursor: not-allowed;
+        }
+
+        .toolbar button.secondary {
+            background: #3c3c3c;
+        }
+
+        .toolbar button.secondary:hover {
+            background: #4c4c4c;
+        }
+
+        .toolbar .status {
+            font-size: 12px;
+            color: #888;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .toolbar .status .indicator {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #888;
+        }
+
+        .toolbar .status .indicator.connected {
+            background: #4caf50;
+        }
+
+        .toolbar .status .indicator.error {
+            background: #f44336;
+        }
+
+        .toolbar .status .indicator.processing {
+            background: #ff9800;
+            animation: pulse 1s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .container {
+            display: flex;
+            height: calc(100% - 48px);
+        }
+
+        .pane {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
+
+        .pane-header {
+            height: 32px;
+            background: #252526;
+            border-bottom: 1px solid #404040;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 12px;
+            font-size: 12px;
+            color: #888;
+        }
+
+        .pane-header .node-count {
+            color: #666;
+        }
+
+        .pane iframe {
+            flex: 1;
+            border: none;
+            background: #1e1e1e;
+        }
+
+        .divider {
+            width: 4px;
+            background: #404040;
+            cursor: col-resize;
+            transition: background 0.15s;
+        }
+
+        .divider:hover {
+            background: #0e639c;
+        }
+    </style>
+</head>
+<body>
+    <div class="toolbar">
+        <h1>Digital Dojo</h1>
+        <div class="toolbar-spacer"></div>
+        <div class="status" id="status">
+            <span class="indicator" id="statusIndicator"></span>
+            <span id="statusText">Checking services...</span>
+        </div>
+        <button class="secondary" id="parseBtn" onclick="triggerParse()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 2L2 7l10 5 10-5-10-5z"></path>
+                <path d="M2 17l10 5 10-5"></path>
+                <path d="M2 12l10 5 10-5"></path>
+            </svg>
+            Parse Scene
+        </button>
+        <button id="generateBtn" onclick="triggerGenerate()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="5 3 19 12 5 21 5 3"></polygon>
+            </svg>
+            Generate
+        </button>
+        <button class="secondary" id="loadAssetsBtn" onclick="loadAssets()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+            Load Splats
+        </button>
+        <button id="mergeBtn" onclick="mergeScene()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="6" cy="6" r="3"></circle>
+                <circle cx="18" cy="6" r="3"></circle>
+                <circle cx="12" cy="18" r="3"></circle>
+                <line x1="6" y1="9" x2="12" y2="15"></line>
+                <line x1="18" y1="9" x2="12" y2="15"></line>
+            </svg>
+            Merge Scene
+        </button>
+    </div>
+
+    <div class="container">
+        <div class="pane" id="leftPane" style="flex: 1;">
+            <div class="pane-header">
+                <span>Scene Description</span>
+                <span class="node-count" id="nodeCount"></span>
+            </div>
+            <iframe id="editorFrame" src="/editor"></iframe>
+        </div>
+
+        <div class="divider" id="divider"></div>
+
+        <div class="pane" id="rightPane" style="flex: 1;">
+            <div class="pane-header">
+                <span>3D Viewer</span>
+                <select id="splatSelect" onchange="loadSelectedSplat()" style="background: #3c3c3c; color: #ccc; border: 1px solid #555; padding: 2px 8px; border-radius: 3px; font-size: 11px;">
+                    <option value="">Select a splat...</option>
+                </select>
+            </div>
+            <iframe id="viewerFrame" src="/supersplat"></iframe>
+        </div>
+    </div>
+
+    <script>
+        // State
+        let currentScene = null;
+        let servicesAvailable = { ollama: false, mongodb: false };
+
+        // DOM elements
+        const divider = document.getElementById('divider');
+        const leftPane = document.getElementById('leftPane');
+        const rightPane = document.getElementById('rightPane');
+        const container = document.querySelector('.container');
+        const editorFrame = document.getElementById('editorFrame');
+        const viewerFrame = document.getElementById('viewerFrame');
+        const statusIndicator = document.getElementById('statusIndicator');
+        const statusText = document.getElementById('statusText');
+        const parseBtn = document.getElementById('parseBtn');
+        const generateBtn = document.getElementById('generateBtn');
+        const nodeCount = document.getElementById('nodeCount');
+
+        // Check service status on load
+        checkServices();
+
+        // Divider drag functionality
+        let isDragging = false;
+
+        divider.addEventListener('mousedown', (e) => {
+            isDragging = true;
+            document.body.style.cursor = 'col-resize';
+            document.body.style.userSelect = 'none';
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            const containerRect = container.getBoundingClientRect();
+            const percentage = ((e.clientX - containerRect.left) / containerRect.width) * 100;
+            if (percentage > 20 && percentage < 80) {
+                leftPane.style.flex = `0 0 ${percentage}%`;
+                rightPane.style.flex = `0 0 ${100 - percentage}%`;
+            }
+        });
+
+        document.addEventListener('mouseup', () => {
+            isDragging = false;
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+        });
+
+        // Cross-iframe communication
+        window.addEventListener('message', (event) => {
+            if (event.data.type === 'editorContent') {
+                parseContent(event.data.content);
+            } else if (event.data.type === 'editorReady') {
+                setStatus('connected', 'Editor ready');
+            } else if (event.data.type === 'contentChanged') {
+                // Content changed - clear current scene (will need re-parse)
+                if (currentScene) {
+                    nodeCount.textContent = '(modified)';
+                }
+            }
+        });
+
+        async function checkServices() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+
+                servicesAvailable = {
+                    ollama: data.ollama,
+                    mongodb: data.mongodb
+                };
+
+                if (data.ollama && data.mongodb) {
+                    setStatus('connected', 'Services ready');
+                } else if (data.ollama) {
+                    setStatus('connected', 'Ollama ready (no DB)');
+                } else {
+                    setStatus('error', 'Ollama not running');
+                }
+
+                console.log('Services:', data);
+            } catch (e) {
+                setStatus('error', 'Cannot connect to server');
+            }
+        }
+
+        function setStatus(state, text) {
+            statusIndicator.className = 'indicator ' + state;
+            statusText.textContent = text;
+        }
+
+        function triggerParse() {
+            setStatus('processing', 'Parsing...');
+            parseBtn.disabled = true;
+            editorFrame.contentWindow.postMessage({ type: 'getContent' }, '*');
+        }
+
+        async function parseContent(content) {
+            console.log('Parsing content...', content.substring(0, 100));
+
+            try {
+                const response = await fetch('/api/parse', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: content })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    currentScene = data.scene;
+                    const count = countNodes(currentScene.root);
+                    nodeCount.textContent = `${count} nodes`;
+                    setStatus('connected', 'Scene parsed');
+                    console.log('Parsed scene:', currentScene);
+                } else {
+                    setStatus('error', data.error || 'Parse failed');
+                }
+            } catch (e) {
+                console.error('Parse error:', e);
+                setStatus('error', 'Parse error: ' + e.message);
+            } finally {
+                parseBtn.disabled = false;
+            }
+        }
+
+        function countNodes(node) {
+            if (!node) return 0;
+            let count = 1;
+            if (node.children) {
+                for (const child of node.children) {
+                    count += countNodes(child);
+                }
+            }
+            return count;
+        }
+
+        function triggerGenerate() {
+            if (!currentScene) {
+                setStatus('error', 'Parse scene first');
+                return;
+            }
+
+            setStatus('processing', 'Generating...');
+            generateBtn.disabled = true;
+            startGeneration();
+        }
+
+        async function startGeneration() {
+            // Find nodes with generators that need processing
+            const generators = findGenerators(currentScene.root);
+
+            if (generators.length === 0) {
+                setStatus('connected', 'No generators found');
+                generateBtn.disabled = false;
+                return;
+            }
+
+            console.log(`Found ${generators.length} generators to process`);
+
+            // Queue jobs for each generator
+            for (const node of generators) {
+                try {
+                    const response = await fetch('/api/generate', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            scene_id: currentScene._id,
+                            node_id: node.id,
+                            prompt: node.generator.prompt
+                        })
+                    });
+
+                    const data = await response.json();
+                    if (data.success) {
+                        console.log(`Queued job ${data.job_id} for node ${node.name}`);
+                    }
+                } catch (e) {
+                    console.error('Failed to queue job:', e);
+                }
+            }
+
+            setStatus('processing', `Queued ${generators.length} jobs - processing...`);
+            generateBtn.disabled = false;
+
+            // Start polling for completion
+            pollJobStatus();
+        }
+
+        function findGenerators(node, results = []) {
+            if (!node) return results;
+            if (node.generator && node.generator.status === 'pending') {
+                results.push(node);
+            }
+            if (node.children) {
+                for (const child of node.children) {
+                    findGenerators(child, results);
+                }
+            }
+            return results;
+        }
+
+        // Store loaded assets for selection
+        let availableAssets = [];
+        const splatSelect = document.getElementById('splatSelect');
+
+        function pathToWebPath(splatPath) {
+            // Convert WSL/absolute path to web path
+            let webPath = splatPath;
+            if (splatPath.includes('media/generated/')) {
+                webPath = '/media/' + splatPath.split('media/')[1];
+            } else if (splatPath.includes('media\\generated\\')) {
+                webPath = '/media/' + splatPath.split('media\\')[1].replace(/\\/g, '/');
+            }
+            return webPath;
+        }
+
+        async function loadAssets() {
+            setStatus('processing', 'Loading assets...');
+
+            try {
+                const response = await fetch('/api/assets?type=splat');
+                const data = await response.json();
+
+                if (data.success && data.assets.length > 0) {
+                    console.log(`Found ${data.assets.length} splat assets`);
+                    availableAssets = data.assets;
+
+                    // Populate dropdown
+                    splatSelect.innerHTML = '<option value="">Select a splat (' + data.assets.length + ' available)...</option>';
+                    data.assets.forEach((asset, index) => {
+                        const option = document.createElement('option');
+                        option.value = index;
+                        const prompt = asset.metadata?.prompt || 'Unknown';
+                        const shortPrompt = prompt.length > 40 ? prompt.substring(0, 40) + '...' : prompt;
+                        option.textContent = shortPrompt;
+                        splatSelect.appendChild(option);
+                    });
+
+                    // Auto-load the most recent one
+                    splatSelect.value = '0';
+                    loadSelectedSplat();
+
+                    setStatus('connected', `${data.assets.length} splats available`);
+                } else {
+                    setStatus('connected', 'No splat assets found');
+                    splatSelect.innerHTML = '<option value="">No splats available</option>';
+                }
+            } catch (e) {
+                console.error('Failed to load assets:', e);
+                setStatus('error', 'Failed to load assets');
+            }
+        }
+
+        function loadSelectedSplat() {
+            const index = splatSelect.value;
+            if (index === '' || !availableAssets[index]) return;
+
+            const asset = availableAssets[index];
+            const webPath = pathToWebPath(asset.path);
+
+            console.log(`Loading splat from: ${webPath}`);
+            viewerFrame.src = `/static/viewer/index.html?content=${encodeURIComponent(webPath)}&noui`;
+
+            const prompt = asset.metadata?.prompt || 'splat';
+            const shortPrompt = prompt.length > 30 ? prompt.substring(0, 30) + '...' : prompt;
+            setStatus('connected', `Viewing: ${shortPrompt}`);
+        }
+
+        async function mergeScene() {
+            if (!currentScene) {
+                setStatus('error', 'Parse scene first');
+                return;
+            }
+
+            setStatus('processing', 'Merging splats...');
+            document.getElementById('mergeBtn').disabled = true;
+
+            try {
+                const response = await fetch(`/api/scenes/${currentScene._id}/merge`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    console.log('Merged scene:', data);
+                    setStatus('connected', `Merged ${data.splat_count} splats (${data.file_size_mb}MB)`);
+
+                    // Load merged splat in viewer
+                    viewerFrame.src = `/static/viewer/index.html?content=${encodeURIComponent(data.merged_path)}&noui`;
+                } else {
+                    setStatus('error', data.error || 'Merge failed');
+                }
+            } catch (e) {
+                console.error('Merge error:', e);
+                setStatus('error', 'Merge error: ' + e.message);
+            } finally {
+                document.getElementById('mergeBtn').disabled = false;
+            }
+        }
+
+        // Poll for job completion after generating
+        async function pollJobStatus(jobIds) {
+            const checkInterval = 5000; // 5 seconds
+
+            const poll = async () => {
+                try {
+                    const response = await fetch('/api/jobs?status=completed');
+                    const data = await response.json();
+
+                    if (data.success && data.count > 0) {
+                        setStatus('connected', `${data.count} jobs completed - click Load Splats`);
+                        return;
+                    }
+
+                    // Check if still processing
+                    const pendingRes = await fetch('/api/jobs?status=pending');
+                    const pendingData = await pendingRes.json();
+
+                    const needsSplatRes = await fetch('/api/jobs?status=needs_splat');
+                    const needsSplatData = await needsSplatRes.json();
+
+                    const total = (pendingData.count || 0) + (needsSplatData.count || 0);
+                    if (total > 0) {
+                        setStatus('processing', `Processing ${total} jobs...`);
+                        setTimeout(poll, checkInterval);
+                    } else {
+                        setStatus('connected', 'All jobs processed');
+                    }
+                } catch (e) {
+                    console.error('Poll error:', e);
+                }
+            };
+
+            setTimeout(poll, checkInterval);
+        }
+    </script>
+</body>
+</html>

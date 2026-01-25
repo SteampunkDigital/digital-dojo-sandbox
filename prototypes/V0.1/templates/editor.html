@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scene Editor</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html, body {
+            height: 100%;
+            overflow: hidden;
+            background: #1e1e1e;
+        }
+
+        #editor-container {
+            height: 100%;
+            width: 100%;
+        }
+    </style>
+</head>
+<body>
+    <div id="editor-container"></div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs/loader.min.js"></script>
+    <script>
+        require.config({ paths: { vs: 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs' } });
+
+        require(['vs/editor/editor.main'], function () {
+            // Define a prose-friendly dark theme
+            monaco.editor.defineTheme('prose-dark', {
+                base: 'vs-dark',
+                inherit: true,
+                rules: [],
+                colors: {
+                    'editor.background': '#1a1a2e',
+                    'editor.foreground': '#e0e0e0',
+                    'editorLineNumber.foreground': '#4a4a6a',
+                    'editor.selectionBackground': '#3a3a5a',
+                    'editor.lineHighlightBackground': '#22223a',
+                    'editorCursor.foreground': '#7c7cff'
+                }
+            });
+
+            // Sample prose content - natural language scene description
+            const sampleContent = `A Forest Clearing at Dawn
+
+The scene opens in a peaceful forest clearing. Morning light filters through the canopy above, casting dappled shadows across the mossy ground.
+
+In the center of the clearing stands an ancient oak tree, its trunk gnarled and weathered by countless seasons. The tree rises perhaps thirty feet tall, its branches spreading wide like welcoming arms.
+
+To the north, three tall pine trees form a natural boundary. They stand close together, their dark green needles contrasting with the lighter foliage of the surrounding forest.
+
+A small stream winds along the eastern edge of the clearing. The water is crystal clear, flowing gently over smooth river stones. Sunlight catches the surface, creating tiny sparkles that dance and shift.
+
+Near the base of the oak tree, a moss-covered boulder provides a natural seat. Wildflowers - purple and yellow - dot the grass around it, swaying gently in a light breeze.
+
+The western edge opens to a gentle slope that leads deeper into the forest, where the trees grow denser and the light grows dim.
+`;
+
+            // Create editor with markdown language for basic formatting
+            const editor = monaco.editor.create(document.getElementById('editor-container'), {
+                value: sampleContent,
+                language: 'markdown',
+                theme: 'prose-dark',
+                fontSize: 16,
+                lineHeight: 28,
+                fontFamily: "'Georgia', 'Cambria', 'Times New Roman', serif",
+                minimap: { enabled: false },
+                scrollBeyondLastLine: true,
+                wordWrap: 'on',
+                wrappingIndent: 'same',
+                lineNumbers: 'off',
+                renderLineHighlight: 'none',
+                automaticLayout: true,
+                padding: { top: 32, bottom: 32 },
+                tabSize: 2,
+                insertSpaces: true,
+                folding: false,
+                glyphMargin: false,
+                lineDecorationsWidth: 24,
+                lineNumbersMinChars: 0,
+                overviewRulerBorder: false,
+                hideCursorInOverviewRuler: true,
+                scrollbar: {
+                    vertical: 'auto',
+                    horizontal: 'hidden',
+                    verticalScrollbarSize: 8
+                },
+                // Make it feel more like a prose editor
+                cursorBlinking: 'smooth',
+                cursorSmoothCaretAnimation: 'on',
+                smoothScrolling: true
+            });
+
+            // Notify parent that editor is ready
+            window.parent.postMessage({ type: 'editorReady' }, '*');
+
+            // Listen for messages from parent
+            window.addEventListener('message', (event) => {
+                if (event.data.type === 'getContent') {
+                    // Send current editor content to parent
+                    window.parent.postMessage({
+                        type: 'editorContent',
+                        content: editor.getValue()
+                    }, '*');
+                } else if (event.data.type === 'setContent') {
+                    // Set editor content
+                    editor.setValue(event.data.content);
+                } else if (event.data.type === 'highlightRange') {
+                    // Highlight a range in the editor (for bidirectional editing)
+                    const { startLine, endLine } = event.data;
+                    editor.setSelection({
+                        startLineNumber: startLine,
+                        startColumn: 1,
+                        endLineNumber: endLine,
+                        endColumn: editor.getModel().getLineMaxColumn(endLine)
+                    });
+                    editor.revealLineInCenter(startLine);
+                }
+            });
+
+            // Handle window resize
+            window.addEventListener('resize', () => {
+                editor.layout();
+            });
+
+            // Track content changes and notify parent
+            let debounceTimer;
+            editor.onDidChangeModelContent(() => {
+                clearTimeout(debounceTimer);
+                debounceTimer = setTimeout(() => {
+                    window.parent.postMessage({
+                        type: 'contentChanged',
+                        content: editor.getValue()
+                    }, '*');
+                }, 500);
+            });
+        });
+    </script>
+</body>
+</html>

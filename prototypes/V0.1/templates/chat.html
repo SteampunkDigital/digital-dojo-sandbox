@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ollama Chat Debug</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #1a1a2e;
+            color: #eee;
+            min-height: 100vh;
+        }
+        h1 { color: #00d4ff; margin-bottom: 5px; }
+        .status {
+            padding: 10px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            font-size: 14px;
+        }
+        .status.connected { background: #1a3a1a; border: 1px solid #2d5a2d; }
+        .status.disconnected { background: #3a1a1a; border: 1px solid #5a2d2d; }
+        .status.checking { background: #3a3a1a; border: 1px solid #5a5a2d; }
+        #chat-container {
+            border: 1px solid #333;
+            border-radius: 8px;
+            height: 400px;
+            overflow-y: auto;
+            padding: 15px;
+            margin-bottom: 15px;
+            background: #16213e;
+        }
+        .message {
+            margin-bottom: 15px;
+            padding: 10px 15px;
+            border-radius: 8px;
+            max-width: 80%;
+        }
+        .message.user {
+            background: #0f4c75;
+            margin-left: auto;
+            text-align: right;
+        }
+        .message.assistant {
+            background: #1b262c;
+        }
+        .message.error {
+            background: #5a2d2d;
+            color: #ff6b6b;
+        }
+        .message .time {
+            font-size: 11px;
+            color: #888;
+            margin-top: 5px;
+        }
+        #input-container {
+            display: flex;
+            gap: 10px;
+        }
+        #message-input {
+            flex: 1;
+            padding: 12px 15px;
+            border: 1px solid #333;
+            border-radius: 8px;
+            background: #16213e;
+            color: #eee;
+            font-size: 14px;
+        }
+        #message-input:focus {
+            outline: none;
+            border-color: #00d4ff;
+        }
+        button {
+            padding: 12px 25px;
+            background: #00d4ff;
+            color: #000;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        button:hover { background: #00b8e6; }
+        button:disabled {
+            background: #555;
+            color: #888;
+            cursor: not-allowed;
+        }
+        .info {
+            font-size: 12px;
+            color: #888;
+            margin-top: 10px;
+        }
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #00d4ff;
+            border-top-color: transparent;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <h1>Ollama Chat Debug</h1>
+    <div id="status" class="status checking">Checking connection...</div>
+
+    <div id="chat-container"></div>
+
+    <div id="input-container">
+        <input type="text" id="message-input" placeholder="Type a message..." disabled>
+        <button id="send-btn" onclick="sendMessage()" disabled>Send</button>
+    </div>
+
+    <div class="info">
+        <strong>Model:</strong> <span id="model-name">-</span> |
+        <strong>URL:</strong> <span id="ollama-url">-</span> |
+        <strong>Response time:</strong> <span id="response-time">-</span>
+    </div>
+
+    <script>
+        const chatContainer = document.getElementById('chat-container');
+        const messageInput = document.getElementById('message-input');
+        const sendBtn = document.getElementById('send-btn');
+        const statusDiv = document.getElementById('status');
+
+        let isConnected = false;
+
+        // Check status on load
+        checkStatus();
+
+        async function checkStatus() {
+            statusDiv.className = 'status checking';
+            statusDiv.textContent = 'Checking Ollama connection...';
+
+            try {
+                const response = await fetch('/api/status');
+
+                // Check if we got JSON
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    const text = await response.text();
+                    throw new Error(`Expected JSON but got ${contentType}. Response: ${text.substring(0, 100)}...`);
+                }
+
+                const data = await response.json();
+
+                document.getElementById('ollama-url').textContent = data.ollama_url || 'unknown';
+
+                if (data.ollama) {
+                    isConnected = true;
+                    const models = data.ollama_models || [];
+                    document.getElementById('model-name').textContent = data.ollama_model || 'unknown';
+                    statusDiv.className = 'status connected';
+                    statusDiv.innerHTML = `Connected to Ollama. Available models: ${models.join(', ') || 'none'}`;
+                    messageInput.disabled = false;
+                    sendBtn.disabled = false;
+                    messageInput.focus();
+                } else {
+                    statusDiv.className = 'status disconnected';
+                    statusDiv.innerHTML = `Ollama not connected.<br>URL: ${data.ollama_url}<br>Model: ${data.ollama_model}<br>Check if Ollama is running and accessible.`;
+                }
+            } catch (e) {
+                statusDiv.className = 'status disconnected';
+                statusDiv.innerHTML = `Connection error: ${e.message}<br><br>Make sure Flask is running: <code>python app.py</code>`;
+            }
+        }
+
+        function addMessage(content, role, time = null) {
+            const div = document.createElement('div');
+            div.className = `message ${role}`;
+
+            const text = document.createElement('div');
+            text.textContent = content;
+            div.appendChild(text);
+
+            if (time) {
+                const timeDiv = document.createElement('div');
+                timeDiv.className = 'time';
+                timeDiv.textContent = time;
+                div.appendChild(timeDiv);
+            }
+
+            chatContainer.appendChild(div);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        async function sendMessage() {
+            const message = messageInput.value.trim();
+            if (!message || !isConnected) return;
+
+            messageInput.value = '';
+            addMessage(message, 'user');
+
+            // Show loading
+            sendBtn.disabled = true;
+            messageInput.disabled = true;
+            const loadingDiv = document.createElement('div');
+            loadingDiv.className = 'message assistant';
+            loadingDiv.innerHTML = '<span class="spinner"></span> Thinking...';
+            loadingDiv.id = 'loading-msg';
+            chatContainer.appendChild(loadingDiv);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+
+            const startTime = Date.now();
+
+            try {
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message })
+                });
+
+                const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+                document.getElementById('response-time').textContent = `${elapsed}s`;
+
+                // Remove loading message
+                document.getElementById('loading-msg')?.remove();
+
+                const data = await response.json();
+
+                if (data.success) {
+                    addMessage(data.response, 'assistant', `${elapsed}s`);
+                } else {
+                    addMessage(`Error: ${data.error}`, 'error');
+                }
+            } catch (e) {
+                document.getElementById('loading-msg')?.remove();
+                addMessage(`Request failed: ${e.message}`, 'error');
+            } finally {
+                sendBtn.disabled = false;
+                messageInput.disabled = false;
+                messageInput.focus();
+            }
+        }
+
+        // Send on Enter
+        messageInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+    </script>
+</body>
+</html>

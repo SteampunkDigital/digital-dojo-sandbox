@@ -8,6 +8,9 @@ media/*.ply
 __pycache__/
 *.pyc
 
+# Environment
+.env
+
 # IDE
 .vscode/
 .idea/
