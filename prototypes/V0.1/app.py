@@ -517,12 +517,17 @@ def api_list_assets():
         # Get all assets of the specified type
         assets = list(db.assets.find({"type": asset_type}).sort("created_at", -1).limit(50))
 
+    # Filter to only include assets where the file actually exists
+    valid_assets = []
     for asset in assets:
-        asset['_id'] = str(asset['_id'])
-        if 'created_at' in asset:
-            asset['created_at'] = asset['created_at'].isoformat()
+        file_path = asset.get('path')
+        if file_path and os.path.exists(file_path):
+            asset['_id'] = str(asset['_id'])
+            if 'created_at' in asset:
+                asset['created_at'] = asset['created_at'].isoformat()
+            valid_assets.append(asset)
 
-    return jsonify({"assets": assets, "count": len(assets), "success": True})
+    return jsonify({"assets": valid_assets, "count": len(valid_assets), "success": True})
 
 
 @app.route('/api/assets/<asset_id>/download')

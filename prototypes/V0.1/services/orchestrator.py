@@ -524,10 +524,21 @@ class GPUOrchestrator:
             logger.error(f"  Mask shape: {mask.shape}, dtype: {mask.dtype}, fg: {fg_pixels}")
             raise
 
-        # Fix coordinate system alignment (SAM3D uses Z-up, viewers use Y-up)
-        # Transformation: X' = -X, Y' = Z, Z' = Y (swap Y/Z, flip X)
+        # NOTE: SAM3D outputs Z-up coordinates, but we do NOT transform here.
+        # Rotating positions without rotating spherical harmonics causes artifacts.
+        # Instead, apply rotation as a parent transform in the viewer/scene.
         gs = output["gs"]
-        self._fix_gaussian_alignment(gs)
+
+        # Center the splat at origin so rotations work correctly
+        # Without centering, rotating around origin shifts the object off-center
+        try:
+            xyz = gs.get_xyz  # Shape: (N, 3)
+            center = xyz.mean(dim=0)  # Centroid of all Gaussians
+            centered_xyz = xyz - center
+            gs.from_xyz(centered_xyz)
+            logger.info(f"Centered splat: moved by ({center[0]:.3f}, {center[1]:.3f}, {center[2]:.3f})")
+        except Exception as e:
+            logger.warning(f"Could not center splat: {e}")
 
         # Save the gaussian splat
         output_path = self.output_dir / f"splat_{uuid.uuid4().hex[:8]}.ply"
@@ -545,37 +556,6 @@ class GPUOrchestrator:
         logger.info(f"Splat saved: {output_path}")
         logger.info(f"VRAM after cleanup: {self.get_vram_usage()}")
         return str(output_path)
-
-    def _fix_gaussian_alignment(self, gs):
-        """
-        Fix coordinate system alignment for the viewer.
-
-        SAM3D outputs in Z-up coordinate system (common in CV/depth estimation),
-        but WebGL/Three.js viewers expect Y-up.
-
-        Transformation matrix (applied to xyz positions):
-          X' = -X  (flip X)
-          Y' = -Z  (old Z becomes new Y, negated to flip upright)
-          Z' = Y   (old Y becomes new Z)
-        """
-        device = gs._xyz.device
-        dtype = gs._xyz.dtype
-
-        # Transformation matrix with Y flipped to correct upside-down issue
-        transform = torch.tensor(
-            [
-                [-1, 0, 0],
-                [0, 0, -1],  # negate Z->Y to flip upright
-                [0, 1, 0],
-            ],
-            device=device,
-            dtype=dtype,
-        )
-
-        # Apply transformation to positions
-        gs._xyz = gs._xyz @ transform.T
-
-        logger.info("Applied Z-up to Y-up coordinate transformation (with Y flip)")
 
     # ==================== Pipeline ====================
 

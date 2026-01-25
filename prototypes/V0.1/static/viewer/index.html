@@ -20,6 +20,12 @@
             const settingsUrl = url.searchParams.has('settings') ? url.searchParams.get('settings') : './settings.json';
             const contentUrl = url.searchParams.has('content') ? url.searchParams.get('content') : './scene.compressed.ply';
 
+            // Rotation parameter: accepts "x,y,z" degrees
+            // Default: 90 X (Z-up to Y-up) + 180 Z (original supersplat convention)
+            const rotationParam = url.searchParams.get('rotation') || '90,0,180';
+            const [rotX, rotY, rotZ] = rotationParam.split(',').map(Number);
+            console.log(`Rotation from URL: "${url.searchParams.get('rotation')}" -> using (${rotX}, ${rotY}, ${rotZ})`);
+
             const sseConfig = {
                 poster: posterUrl && createImage(posterUrl),
                 skyboxUrl,
@@ -30,7 +36,8 @@
                 ministats: url.searchParams.has('ministats'),
                 colorize: url.searchParams.has('colorize'),
                 unified: url.searchParams.has('unified'),
-                aa: url.searchParams.has('aa')
+                aa: url.searchParams.has('aa'),
+                rotation: { x: rotX, y: rotY, z: rotZ }
             };
 
             window.sse = {
@@ -50,8 +57,8 @@
                 <pc-entity name="light" rotation="35 45 0">
                     <pc-light color="white" intensity="1.5"></pc-light>
                 </pc-entity>
-                <!-- Splat -->
-                <pc-entity name="splat" rotation="0 0 180">
+                <!-- Splat placeholder (actual gsplat loaded dynamically to app.root) -->
+                <pc-entity name="splat" id="splatEntity">
                 </pc-entity>
             </pc-scene>
         </pc-app>
@@ -321,13 +328,42 @@
             }
 
             document.addEventListener('DOMContentLoaded', async () => {
-                const [appElement, cameraElement, settingsJson] = await Promise.all([
+                const [appElement, cameraElement, splatElement, settingsJson] = await Promise.all([
                     document.querySelector('pc-app').ready(),
                     document.querySelector('pc-entity[name="camera"]').ready(),
+                    document.querySelector('#splatEntity').ready(),
                     settings
                 ]);
 
                 const viewer = await main(appElement.app, cameraElement.entity, settingsJson, config);
+
+                // Apply rotation from URL parameter AFTER the gsplat loads
+                // The gsplat entity is created dynamically by loadGsplat() which runs async
+                // We need to wait for it to appear before we can rotate it
+                const { rotation } = config;
+                if (rotation) {
+                    // Wait for gsplat entity to be created (loadGsplat is async)
+                    const waitForGsplat = () => {
+                        return new Promise((resolve) => {
+                            const check = () => {
+                                const gsplatEntity = appElement.app.root.findByName('gsplat');
+                                if (gsplatEntity) {
+                                    resolve(gsplatEntity);
+                                } else {
+                                    requestAnimationFrame(check);
+                                }
+                            };
+                            check();
+                        });
+                    };
+
+                    const gsplatEntity = await waitForGsplat();
+                    // Override loadGsplat's default (0, 0, 180) with our rotation
+                    gsplatEntity.setLocalEulerAngles(rotation.x, rotation.y, rotation.z);
+                    // Trigger a re-render
+                    appElement.app.renderNextFrame = true;
+                    console.log(`Applied rotation (${rotation.x}, ${rotation.y}, ${rotation.z}) to gsplat entity`);
+                }
             });
         </script>
     </body>
