@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/david/Documents/GitHub/sd3.5/**)"
+    ]
+  }
+}

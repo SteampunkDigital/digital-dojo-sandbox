@@ -91,28 +91,71 @@ class GPUOrchestrator:
         else:
             logger.warning("CUDA not available, running on CPU")
 
-    def clear_gpu_memory(self):
-        """Aggressively free GPU memory"""
+    def clear_gpu_memory(self, force_reset: bool = False):
+        """
+        Aggressively free GPU memory.
+
+        Args:
+            force_reset: If True, attempt to reset CUDA context after OOM errors
+        """
+        # Delete model references first
         if self.model_instance is not None:
-            # Try to cleanup model-specific resources
-            if hasattr(self.model_instance, 'cleanup'):
-                self.model_instance.cleanup()
-            del self.model_instance
+            try:
+                if hasattr(self.model_instance, 'cleanup'):
+                    self.model_instance.cleanup()
+            except Exception as e:
+                logger.warning(f"Model cleanup failed: {e}")
+            try:
+                del self.model_instance
+            except Exception:
+                pass
             self.model_instance = None
 
         # Also unload SAM if loaded
         if self._sam_predictor is not None:
-            del self._sam_predictor
+            try:
+                del self._sam_predictor
+            except Exception:
+                pass
             self._sam_predictor = None
 
         self.current_model = ModelType.NONE
+
+        # Force Python garbage collection
         gc.collect()
 
+        # CUDA cleanup with error handling for corrupted state
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
+            try:
+                torch.cuda.synchronize()
+            except Exception as e:
+                logger.warning(f"CUDA synchronize failed: {e}")
 
-        logger.info(f"GPU memory cleared. VRAM: {self.get_vram_usage()}")
+            try:
+                torch.cuda.empty_cache()
+            except Exception as e:
+                logger.warning(f"CUDA empty_cache failed: {e}")
+                force_reset = True
+
+            # If CUDA is in a bad state, try more aggressive reset
+            if force_reset:
+                logger.warning("Attempting CUDA context reset after OOM...")
+                try:
+                    torch.cuda.reset_peak_memory_stats()
+                    torch.cuda.reset_accumulated_memory_stats()
+                except Exception:
+                    pass
+                # Final attempt - may need process restart if this fails
+                gc.collect()
+                try:
+                    torch.cuda.empty_cache()
+                except Exception as e:
+                    logger.error(f"CUDA recovery failed: {e}. May need worker restart.")
+
+        try:
+            logger.info(f"GPU memory cleared. VRAM: {self.get_vram_usage()}")
+        except Exception:
+            logger.info("GPU memory cleared (unable to query VRAM)")
 
     def get_vram_usage(self) -> Dict[str, float]:
         """Get current VRAM usage in GB"""
@@ -270,27 +313,30 @@ class GPUOrchestrator:
                 "Download from: https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth"
             )
 
-    def _find_foreground_point(self, image_np: np.ndarray, num_samples: int = 100) -> tuple:
+    def _find_foreground_points(self, image_np: np.ndarray, max_points: int = 5,
+                                  num_samples: int = 200, min_separation: float = 0.15) -> list:
         """
-        Find a point likely to be on the foreground object.
+        Find multiple spread-out points likely to be on foreground objects.
 
         Strategy:
         1. Sample edge pixels to estimate background color
         2. Sample random points across the image
         3. Find points that differ significantly from background
-        4. Return the point closest to center among non-background points
+        4. Use greedy selection to pick spatially spread points (for multiple objects)
 
         Args:
             image_np: RGB image as numpy array (H, W, 3)
+            max_points: Maximum number of points to return (up to 5)
             num_samples: Number of random points to sample
+            min_separation: Minimum distance between selected points as fraction of image size
 
         Returns:
-            (x, y) coordinates of a likely foreground point
+            List of (x, y) tuples for foreground points
         """
         h, w = image_np.shape[:2]
+        min_dist_pixels = min(h, w) * min_separation
 
         # Sample edge pixels to estimate background color
-        # Take pixels from the borders (likely background for centered objects)
         edge_pixels = []
         border = 20  # pixels from edge
         # Top edge
@@ -307,7 +353,6 @@ class GPUOrchestrator:
         logger.info(f"Estimated background color: RGB{tuple(bg_color.astype(int))}")
 
         # Sample random points across the central region of the image
-        # Avoid edges where background is more likely
         margin = int(min(h, w) * 0.1)  # 10% margin
         np.random.seed(42)  # reproducible
         sample_y = np.random.randint(margin, h - margin, num_samples)
@@ -319,32 +364,46 @@ class GPUOrchestrator:
             pixel_color = image_np[y, x, :]
             # Euclidean distance in RGB space
             color_dist = np.sqrt(np.sum((pixel_color.astype(float) - bg_color) ** 2))
-            # Distance from center (prefer points closer to center)
-            center_dist = np.sqrt((x - w/2)**2 + (y - h/2)**2)
-            candidates.append((x, y, color_dist, center_dist))
+            candidates.append((x, y, color_dist))
 
         # Filter to points that are significantly different from background
-        # Threshold: at least 50 units away in RGB space (out of 441 max)
         bg_threshold = 50
-        foreground_candidates = [(x, y, cd, center_d) for x, y, cd, center_d in candidates if cd > bg_threshold]
+        foreground_candidates = [(x, y, cd) for x, y, cd in candidates if cd > bg_threshold]
 
-        if foreground_candidates:
-            # Sort by distance from center (prefer centered points)
-            foreground_candidates.sort(key=lambda p: p[3])
-            best = foreground_candidates[0]
-            logger.info(f"Found foreground point at ({best[0]}, {best[1]}) with color_dist={best[2]:.1f}")
-            return (best[0], best[1])
-        else:
-            # Fallback to center if no good candidates found
+        if not foreground_candidates:
             logger.warning("No clear foreground points found, using center")
-            return (w // 2, h // 2)
+            return [(w // 2, h // 2)]
+
+        # Sort by color distance (strongest foreground signal first)
+        foreground_candidates.sort(key=lambda p: p[2], reverse=True)
+
+        # Greedy selection: pick points that are far apart from already selected points
+        selected_points = []
+        for x, y, cd in foreground_candidates:
+            if len(selected_points) >= max_points:
+                break
+
+            # Check distance from all already selected points
+            is_far_enough = True
+            for sx, sy in selected_points:
+                dist = np.sqrt((x - sx)**2 + (y - sy)**2)
+                if dist < min_dist_pixels:
+                    is_far_enough = False
+                    break
+
+            if is_far_enough:
+                selected_points.append((x, y))
+                logger.info(f"Selected foreground point {len(selected_points)}: ({x}, {y}) color_dist={cd:.1f}")
+
+        logger.info(f"Found {len(selected_points)} spread foreground points")
+        return selected_points
 
     def segment_with_sam(self, image: Image.Image) -> np.ndarray:
         """
-        Segment the main object in an image using SAM with intelligent point prompting.
+        Segment all foreground objects in an image using SAM with multi-point prompting.
 
-        Uses background color estimation to find a likely foreground point,
-        rather than assuming the object is perfectly centered.
+        Uses background color estimation to find multiple spread-out foreground points,
+        capturing multiple objects if present in the scene.
 
         Returns a binary mask where 255 = object, 0 = background.
         """
@@ -352,21 +411,23 @@ class GPUOrchestrator:
 
         # Convert PIL image to numpy array
         image_np = np.array(image.convert('RGB'))
+        h, w = image_np.shape[:2]
 
         # Set image for SAM
         self._sam_predictor.set_image(image_np)
 
-        # Find a good foreground point using color analysis
-        h, w = image_np.shape[:2]
-        fg_x, fg_y = self._find_foreground_point(image_np)
-        prompt_point = np.array([[fg_x, fg_y]])
-        point_labels = np.array([1])  # 1 = foreground
+        # Find multiple spread-out foreground points
+        fg_points = self._find_foreground_points(image_np, max_points=5)
 
-        logger.info(f"SAM prompt point: ({fg_x}, {fg_y}) in {w}x{h} image")
+        # Convert to arrays for SAM
+        prompt_points = np.array(fg_points)
+        point_labels = np.ones(len(fg_points), dtype=np.int32)  # All foreground
 
-        # Get mask prediction
+        logger.info(f"SAM prompt: {len(fg_points)} points in {w}x{h} image")
+
+        # Get mask prediction with multiple points
         masks, scores, _ = self._sam_predictor.predict(
-            point_coords=prompt_point,
+            point_coords=prompt_points,
             point_labels=point_labels,
             multimask_output=True
         )

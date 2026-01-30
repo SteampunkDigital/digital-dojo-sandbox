@@ -1,0 +1,1045 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Library Review - {{ library.name }}</title>
+    <!-- Google's model-viewer for 3D GLB display -->
+    <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.4.0/model-viewer.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html, body {
+            height: 100%;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1e1e1e;
+            color: #ccc;
+        }
+
+        .toolbar {
+            height: 48px;
+            background: #2d2d2d;
+            border-bottom: 1px solid #404040;
+            display: flex;
+            align-items: center;
+            padding: 0 16px;
+            gap: 12px;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .toolbar h1 {
+            font-size: 14px;
+            font-weight: 500;
+            color: #ccc;
+        }
+
+        .toolbar-spacer {
+            flex: 1;
+        }
+
+        .toolbar button {
+            padding: 8px 16px;
+            background: #0e639c;
+            border: none;
+            border-radius: 4px;
+            color: white;
+            font-size: 13px;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        .toolbar button:hover {
+            background: #1177bb;
+        }
+
+        .toolbar button.secondary {
+            background: #3c3c3c;
+        }
+
+        .toolbar button.secondary:hover {
+            background: #4c4c4c;
+        }
+
+        .toolbar button.secondary.active {
+            background: #2e7d32;
+            color: white;
+        }
+
+        .stats {
+            font-size: 12px;
+            color: #888;
+            display: flex;
+            gap: 16px;
+        }
+
+        .stats .stat {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .stats .stat .count {
+            font-weight: 600;
+            color: #ccc;
+        }
+
+        .stats .stat.pending .count { color: #ff9800; }
+        .stats .stat.approved .count { color: #4caf50; }
+        .stats .stat.rejected .count { color: #f44336; }
+
+        .filter-tabs {
+            display: flex;
+            gap: 4px;
+            background: #252525;
+            padding: 4px;
+            border-radius: 6px;
+        }
+
+        .filter-tabs button {
+            padding: 6px 12px;
+            background: transparent;
+            border: none;
+            border-radius: 4px;
+            color: #888;
+            font-size: 12px;
+            cursor: pointer;
+        }
+
+        .filter-tabs button:hover {
+            background: #3c3c3c;
+            color: #ccc;
+        }
+
+        .filter-tabs button.active {
+            background: #0e639c;
+            color: white;
+        }
+
+        .content {
+            padding: 16px;
+            overflow-y: auto;
+            height: calc(100vh - 48px);
+        }
+
+        .group {
+            background: #252525;
+            border-radius: 8px;
+            margin-bottom: 16px;
+            overflow: hidden;
+        }
+
+        .group-header {
+            padding: 12px 16px;
+            background: #2d2d2d;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            border-bottom: 1px solid #404040;
+        }
+
+        .group-header .description {
+            flex: 1;
+            font-size: 14px;
+            color: #fff;
+        }
+
+        .group-header .variant-count {
+            font-size: 12px;
+            color: #888;
+        }
+
+        .group-header .edit-btn {
+            padding: 4px 8px;
+            background: transparent;
+            border: 1px solid #555;
+            border-radius: 4px;
+            color: #888;
+            font-size: 11px;
+            cursor: pointer;
+        }
+
+        .group-header .edit-btn:hover {
+            background: #3c3c3c;
+            color: #ccc;
+        }
+
+        .variants-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 12px;
+            padding: 16px;
+        }
+
+        .variant-card {
+            background: #1e1e1e;
+            border-radius: 6px;
+            overflow: hidden;
+            border: 2px solid transparent;
+            transition: border-color 0.15s;
+        }
+
+        .variant-card.approved {
+            border-color: #4caf50;
+        }
+
+        .variant-card.rejected {
+            border-color: #f44336;
+            opacity: 0.6;
+        }
+
+        .variant-card img {
+            width: 100%;
+            aspect-ratio: 1;
+            object-fit: cover;
+            cursor: pointer;
+            display: block;
+        }
+
+        .variant-card img:hover {
+            opacity: 0.9;
+        }
+
+        .variant-info {
+            padding: 8px;
+            font-size: 11px;
+            color: #888;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .variant-info .status-badge {
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            text-transform: uppercase;
+        }
+
+        .variant-info .status-badge.needs_review { background: #ff9800; color: #000; }
+        .variant-info .status-badge.approved { background: #4caf50; color: #fff; }
+        .variant-info .status-badge.rejected { background: #f44336; color: #fff; }
+
+        .variant-error {
+            padding: 6px 8px;
+            background: #4a1515;
+            border-top: 1px solid #333;
+            font-size: 10px;
+            color: #f88;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            cursor: help;
+        }
+
+        .variant-actions {
+            padding: 8px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            border-top: 1px solid #333;
+        }
+
+        .variant-actions button, .variant-actions a {
+            flex: 1 1 auto;
+            min-width: 32px;
+            padding: 6px 10px;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: background 0.15s;
+            text-align: center;
+        }
+
+        .variant-actions .approve-btn {
+            background: #2e7d32;
+            color: white;
+        }
+
+        .variant-actions .approve-btn:hover {
+            background: #388e3c;
+        }
+
+        .variant-actions .reject-btn {
+            background: #c62828;
+            color: white;
+        }
+
+        .variant-actions .reject-btn:hover {
+            background: #d32f2f;
+        }
+
+        .variant-actions .retry-btn {
+            background: #ff9800;
+            color: #000;
+        }
+
+        .variant-actions .retry-btn:hover {
+            background: #ffa726;
+        }
+
+        .variant-actions button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .variant-actions .view-3d-btn {
+            background: #0e639c;
+            color: white;
+        }
+
+        .variant-actions .view-3d-btn:hover {
+            background: #1177bb;
+        }
+
+        .variant-actions .download-btn {
+            background: #3c3c3c;
+            color: #ccc;
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .variant-actions .download-btn:hover {
+            background: #4c4c4c;
+        }
+
+        /* 3D Viewer Modal */
+        .viewer-modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .viewer-modal.active {
+            display: flex;
+        }
+
+        .viewer-modal .viewer-container {
+            width: 80%;
+            height: 80%;
+            background: #1e1e1e;
+            border-radius: 8px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .viewer-modal .viewer-close {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.5);
+            border: none;
+            color: white;
+            font-size: 24px;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            cursor: pointer;
+            z-index: 10;
+        }
+
+        .viewer-modal .viewer-close:hover {
+            background: rgba(0, 0, 0, 0.7);
+        }
+
+        .viewer-modal model-viewer {
+            width: 100%;
+            height: 100%;
+            --poster-color: #1e1e1e;
+        }
+
+        .group-actions {
+            padding: 12px 16px;
+            background: #2d2d2d;
+            display: flex;
+            gap: 8px;
+            border-top: 1px solid #404040;
+        }
+
+        .group-actions button {
+            padding: 6px 12px;
+            border: none;
+            border-radius: 4px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        .group-actions .approve-all {
+            background: #2e7d32;
+            color: white;
+        }
+
+        .group-actions .approve-all:hover {
+            background: #388e3c;
+        }
+
+        .group-actions .reject-all {
+            background: #c62828;
+            color: white;
+        }
+
+        .group-actions .reject-all:hover {
+            background: #d32f2f;
+        }
+
+        .group-actions .add-variant {
+            background: #3c3c3c;
+            color: #ccc;
+        }
+
+        .group-actions .add-variant:hover {
+            background: #4c4c4c;
+        }
+
+        .group-actions .retry-all {
+            background: #ff9800;
+            color: #000;
+        }
+
+        .group-actions .retry-all:hover {
+            background: #ffa726;
+        }
+
+        /* Lightbox */
+        .lightbox {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .lightbox.active {
+            display: flex;
+        }
+
+        .lightbox img {
+            max-width: 90%;
+            max-height: 90%;
+            object-fit: contain;
+        }
+
+        .lightbox-close {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: none;
+            border: none;
+            color: white;
+            font-size: 32px;
+            cursor: pointer;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #666;
+        }
+
+        .empty-state h2 {
+            font-size: 18px;
+            margin-bottom: 8px;
+            color: #888;
+        }
+
+        /* Edit prompt modal */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: #2d2d2d;
+            border-radius: 8px;
+            padding: 20px;
+            width: 90%;
+            max-width: 500px;
+        }
+
+        .modal-content h3 {
+            margin-bottom: 16px;
+            font-size: 16px;
+        }
+
+        .modal-content textarea {
+            width: 100%;
+            height: 100px;
+            background: #1e1e1e;
+            border: 1px solid #404040;
+            border-radius: 4px;
+            padding: 10px;
+            color: #ccc;
+            font-size: 14px;
+            resize: vertical;
+        }
+
+        .modal-content .modal-actions {
+            margin-top: 16px;
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+        }
+
+        .modal-content .modal-actions button {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .modal-content .modal-actions .save-btn {
+            background: #0e639c;
+            color: white;
+        }
+
+        .modal-content .modal-actions .cancel-btn {
+            background: #3c3c3c;
+            color: #ccc;
+        }
+    </style>
+</head>
+<body>
+    <div class="toolbar">
+        <h1>Library Review: {{ library.name }}</h1>
+        <div class="toolbar-spacer"></div>
+
+        <div class="stats">
+            <div class="stat pending">
+                <span class="count" id="stat-pending">-</span> pending
+            </div>
+            <div class="stat approved">
+                <span class="count" id="stat-processing">-</span> processing
+            </div>
+            <div class="stat rejected">
+                <span class="count" id="stat-rejected">-</span> rejected
+            </div>
+            <div class="stat">
+                <span class="count" id="stat-ready" style="color:#4caf50">-</span> ready
+            </div>
+            <div class="stat">
+                <span class="count" id="stat-failed" style="color:#f44336">-</span> failed
+            </div>
+        </div>
+
+        <div class="filter-tabs">
+            <button class="active" data-status="needs_review">Pending</button>
+            <button data-status="processing">Processing</button>
+            <button data-status="rejected">Rejected</button>
+            <button data-status="ready">Ready</button>
+            <button data-status="failed">Failed</button>
+        </div>
+
+        <button class="secondary" onclick="refreshData()">Refresh</button>
+        <button class="secondary" id="auto-refresh-btn" onclick="toggleAutoRefresh()">Auto-refresh: OFF</button>
+    </div>
+
+    <div class="content" id="content">
+        <div class="empty-state">
+            <h2>Loading...</h2>
+        </div>
+    </div>
+
+    <!-- Lightbox for full-size images -->
+    <div class="lightbox" id="lightbox" onclick="closeLightbox()">
+        <button class="lightbox-close">&times;</button>
+        <img id="lightbox-img" src="" alt="Full size">
+    </div>
+
+    <!-- Edit prompt modal -->
+    <div class="modal" id="edit-modal">
+        <div class="modal-content">
+            <h3>Edit Prompt</h3>
+            <textarea id="edit-description"></textarea>
+            <div class="modal-actions">
+                <button class="cancel-btn" onclick="closeEditModal()">Cancel</button>
+                <button class="save-btn" onclick="saveDescription()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 3D Viewer modal -->
+    <div class="viewer-modal" id="viewer-modal" onclick="closeViewer(event)">
+        <div class="viewer-container" onclick="event.stopPropagation()">
+            <button class="viewer-close" onclick="closeViewer()">&times;</button>
+            <model-viewer id="model-viewer"
+                camera-controls
+                touch-action="pan-y"
+                auto-rotate
+                shadow-intensity="1"
+                environment-image="neutral"
+                exposure="1.0"
+            ></model-viewer>
+        </div>
+    </div>
+
+    <script>
+        const libraryId = '{{ library._id }}';
+        let currentStatus = 'needs_review';
+        let groups = [];
+        let editingGroupId = null;
+        let autoRefreshInterval = null;
+        let autoRefreshEnabled = false;
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            loadStats();
+            loadReviewItems();
+
+            // Filter tab clicks
+            document.querySelectorAll('.filter-tabs button').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    document.querySelectorAll('.filter-tabs button').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    currentStatus = btn.dataset.status;
+                    loadReviewItems();
+                });
+            });
+
+            // Start auto-refresh by default for processing tab
+            if (currentStatus === 'processing') {
+                toggleAutoRefresh(true);
+            }
+        });
+
+        function toggleAutoRefresh(enable) {
+            const btn = document.getElementById('auto-refresh-btn');
+            if (enable === undefined) {
+                enable = !autoRefreshEnabled;
+            }
+
+            autoRefreshEnabled = enable;
+
+            if (autoRefreshEnabled) {
+                btn.textContent = 'Auto-refresh: ON';
+                btn.classList.add('active');
+                autoRefreshInterval = setInterval(() => {
+                    loadStats();
+                    loadReviewItems();
+                }, 5000); // Refresh every 5 seconds
+            } else {
+                btn.textContent = 'Auto-refresh: OFF';
+                btn.classList.remove('active');
+                if (autoRefreshInterval) {
+                    clearInterval(autoRefreshInterval);
+                    autoRefreshInterval = null;
+                }
+            }
+        }
+
+        async function loadStats() {
+            try {
+                const res = await fetch(`/api/libraries/${libraryId}/stats?_=${Date.now()}`);
+                const data = await res.json();
+                if (data.success) {
+                    document.getElementById('stat-pending').textContent = data.needs_review || 0;
+                    document.getElementById('stat-processing').textContent = data.processing || 0;
+                    document.getElementById('stat-rejected').textContent = data.rejected || 0;
+                    document.getElementById('stat-ready').textContent = data.ready || 0;
+                    document.getElementById('stat-failed').textContent = data.failed || 0;
+                }
+            } catch (e) {
+                console.error('Failed to load stats:', e);
+            }
+        }
+
+        async function loadReviewItems() {
+            const content = document.getElementById('content');
+            content.innerHTML = '<div class="empty-state"><h2>Loading...</h2></div>';
+
+            try {
+                const res = await fetch(`/api/libraries/${libraryId}/review?status=${currentStatus}&_=${Date.now()}`);
+                const data = await res.json();
+
+                if (!data.success) {
+                    content.innerHTML = `<div class="empty-state"><h2>Error: ${data.error}</h2></div>`;
+                    return;
+                }
+
+                groups = data.groups;
+
+                if (groups.length === 0) {
+                    const statusLabels = {
+                        'needs_review': 'pending review',
+                        'processing': 'processing',
+                        'rejected': 'rejected',
+                        'ready': 'ready',
+                        'failed': 'failed'
+                    };
+                    const statusLabel = statusLabels[currentStatus] || currentStatus;
+                    content.innerHTML = `<div class="empty-state"><h2>No ${statusLabel} items</h2></div>`;
+                    return;
+                }
+
+                content.innerHTML = groups.map(renderGroup).join('');
+
+            } catch (e) {
+                console.error('Failed to load items:', e);
+                content.innerHTML = `<div class="empty-state"><h2>Failed to load items</h2></div>`;
+            }
+        }
+
+        function renderGroup(group) {
+            const variants = group.variants.map(renderVariant).join('');
+            const isReviewable = currentStatus === 'needs_review';
+            const isRetryable = currentStatus === 'rejected' || currentStatus === 'failed';
+
+            return `
+                <div class="group" data-group-id="${group.variant_group_id}">
+                    <div class="group-header">
+                        <span class="description">${escapeHtml(group.description)}</span>
+                        <span class="variant-count">(${group.variants.length} variants)</span>
+                        <button class="edit-btn" onclick="openEditModal('${group.variant_group_id}', '${escapeHtml(group.description)}')">Edit Prompt</button>
+                    </div>
+                    <div class="variants-grid">
+                        ${variants}
+                    </div>
+                    <div class="group-actions">
+                        ${isReviewable ? `
+                        <button class="approve-all" onclick="approveGroup('${group.variant_group_id}')">Approve All</button>
+                        <button class="reject-all" onclick="rejectGroup('${group.variant_group_id}')">Reject All</button>
+                        <button class="add-variant" onclick="addVariant('${group.variants[0]._id}')">+ Add Variant</button>
+                        ` : ''}
+                        ${isRetryable ? `
+                        <button class="retry-all" onclick="resetGroup('${group.variant_group_id}')">Retry All</button>
+                        ` : ''}
+                        <button class="reject-all" onclick="deleteGroup('${group.variant_group_id}')" style="margin-left: auto;">Delete All</button>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderVariant(variant) {
+            const status = variant.status;
+            const isReviewable = status === 'needs_review';
+            const isRetryable = status === 'rejected' || status === 'failed';
+            const isProcessing = ['approved', 'needs_mask', 'needs_3d', 'needs_embedding'].includes(status);
+            const isStuck = ['needs_3d', 'needs_embedding'].includes(status);  // Only show Force Retry for items past mask stage
+            const isReady = status === 'ready';
+            const rawPath = variant.image_path || '';
+            const imgSrc = rawPath && !rawPath.startsWith('/') ? '/' + rawPath : rawPath;
+            const hasImage = !!rawPath;
+            const rawAssetPath = variant.asset_path || '';
+            const assetSrc = rawAssetPath && !rawAssetPath.startsWith('/') ? '/' + rawAssetPath : rawAssetPath;
+            const hasAsset = !!rawAssetPath;
+            const assetType = variant.asset_type || 'mesh';
+            const hasError = !!variant.error;
+
+            return `
+                <div class="variant-card ${status}" data-item-id="${variant._id}">
+                    ${hasImage ? `<img src="${imgSrc}" onclick="showLightbox('${imgSrc}')" />` : '<div style="aspect-ratio:1;background:#333;display:flex;align-items:center;justify-content:center;color:#666;">No image</div>'}
+                    <div class="variant-info">
+                        <span>Seed: ${variant.seed}</span>
+                        <span class="status-badge ${status}">${status.replace('_', ' ')}</span>
+                    </div>
+                    ${hasError ? `
+                    <div class="variant-error">
+                        <span title="${escapeHtml(variant.error)}">Error: ${escapeHtml(variant.error.substring(0, 50))}${variant.error.length > 50 ? '...' : ''}</span>
+                    </div>
+                    ` : ''}
+                    <div class="variant-actions">
+                        ${isReviewable ? `
+                        <button class="approve-btn" onclick="approveItem('${variant._id}')">Approve</button>
+                        <button class="reject-btn" onclick="rejectItem('${variant._id}')">Reject</button>
+                        ` : ''}
+                        ${isRetryable ? `
+                        <button class="retry-btn" onclick="resetItem('${variant._id}')" title="Reset with new seed">Retry</button>
+                        ` : ''}
+                        ${isStuck && !hasAsset ? `
+                        <button class="retry-btn" onclick="retryItem('${variant._id}')" title="Retry from mask generation (keeps image)">Force Retry</button>
+                        ` : ''}
+                        ${hasAsset ? `
+                        <button class="view-3d-btn" onclick="view3D('${assetSrc}', '${assetType}')" title="View 3D Model">👁</button>
+                        <a href="${assetSrc}" download class="download-btn" title="Download ${assetType}">⬇</a>
+                        ` : ''}
+                        ${isReady ? `
+                        <button class="retry-btn" onclick="retryItem('${variant._id}')" title="Regenerate 3D from same image">🔄</button>
+                        <button class="reject-btn" onclick="resetItem('${variant._id}')" title="Regenerate image with new seed">🖼</button>
+                        ` : ''}
+                    </div>
+                </div>
+            `;
+        }
+
+        async function approveItem(itemId) {
+            try {
+                const res = await fetch(`/api/libraries/items/${itemId}/approve`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: '{}'
+                });
+                const data = await res.json();
+                if (data.success) {
+                    loadStats();
+                    loadReviewItems();
+                } else {
+                    alert('Failed to approve: ' + data.error);
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
+        }
+
+        async function rejectItem(itemId) {
+            try {
+                const res = await fetch(`/api/libraries/items/${itemId}/reject`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: '{}'
+                });
+                const data = await res.json();
+                if (data.success) {
+                    loadStats();
+                    loadReviewItems();
+                } else {
+                    alert('Failed to reject: ' + data.error);
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
+        }
+
+        async function resetItem(itemId) {
+            try {
+                const res = await fetch(`/api/libraries/items/${itemId}/reset`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: '{}'
+                });
+                const data = await res.json();
+                if (data.success) {
+                    loadStats();
+                    loadReviewItems();
+                } else {
+                    alert('Failed to reset: ' + data.error);
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
+        }
+
+        async function retryItem(itemId) {
+            // Retry a stuck processing item - keeps image, retries from mask generation
+            try {
+                const res = await fetch(`/api/libraries/items/${itemId}/retry`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: '{}'
+                });
+                const data = await res.json();
+                if (data.success) {
+                    loadStats();
+                    loadReviewItems();
+                } else {
+                    alert('Failed to retry: ' + data.error);
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
+        }
+
+        async function resetGroup(groupId) {
+            try {
+                const res = await fetch(`/api/libraries/groups/${groupId}/reset`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: '{}'
+                });
+                const data = await res.json();
+                if (data.success) {
+                    alert(`Reset ${data.reset_count} items for regeneration. Run the worker to process them.`);
+                    loadStats();
+                    loadReviewItems();
+                } else {
+                    alert('Failed to reset group: ' + data.error);
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
+        }
+
+        async function approveGroup(groupId) {
+            try {
+                const res = await fetch(`/api/libraries/groups/${groupId}/approve-all`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: '{}'
+                });
+                const data = await res.json();
+                if (data.success) {
+                    loadStats();
+                    loadReviewItems();
+                } else {
+                    alert('Failed to approve group: ' + data.error);
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
+        }
+
+        async function rejectGroup(groupId) {
+            try {
+                const res = await fetch(`/api/libraries/groups/${groupId}/reject-all`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: '{}'
+                });
+                const data = await res.json();
+                if (data.success) {
+                    loadStats();
+                    loadReviewItems();
+                } else {
+                    alert('Failed to reject group: ' + data.error);
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
+        }
+
+        async function deleteGroup(groupId) {
+            if (!confirm('Delete all variants of this item? This cannot be undone.')) {
+                return;
+            }
+            try {
+                const res = await fetch(`/api/libraries/groups/${groupId}`, { method: 'DELETE' });
+                const data = await res.json();
+                if (data.success) {
+                    loadStats();
+                    loadReviewItems();
+                } else {
+                    alert('Failed to delete group: ' + data.error);
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
+        }
+
+        async function addVariant(itemId) {
+            try {
+                const res = await fetch(`/api/libraries/items/${itemId}/regenerate`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: '{}'
+                });
+                const data = await res.json();
+                if (data.success) {
+                    alert('New variant queued for generation. Run the worker to process it.');
+                    loadStats();
+                } else {
+                    alert('Failed to create variant: ' + data.error);
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
+        }
+
+        function openEditModal(groupId, description) {
+            editingGroupId = groupId;
+            document.getElementById('edit-description').value = description;
+            document.getElementById('edit-modal').classList.add('active');
+        }
+
+        function closeEditModal() {
+            editingGroupId = null;
+            document.getElementById('edit-modal').classList.remove('active');
+        }
+
+        async function saveDescription() {
+            const newDescription = document.getElementById('edit-description').value.trim();
+            if (!newDescription || !editingGroupId) return;
+
+            try {
+                const res = await fetch(`/api/libraries/groups/${editingGroupId}/description`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ description: newDescription })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    closeEditModal();
+                    loadReviewItems();
+                } else {
+                    alert('Failed to update: ' + data.error);
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
+        }
+
+        function showLightbox(imagePath) {
+            document.getElementById('lightbox-img').src = imagePath;
+            document.getElementById('lightbox').classList.add('active');
+        }
+
+        function closeLightbox() {
+            document.getElementById('lightbox').classList.remove('active');
+        }
+
+        function view3D(assetPath, assetType) {
+            const viewer = document.getElementById('model-viewer');
+            viewer.src = assetPath;
+            document.getElementById('viewer-modal').classList.add('active');
+        }
+
+        function closeViewer(event) {
+            if (event && event.target !== document.getElementById('viewer-modal')) {
+                return;
+            }
+            document.getElementById('viewer-modal').classList.remove('active');
+            document.getElementById('model-viewer').src = '';
+        }
+
+        function refreshData() {
+            loadStats();
+            loadReviewItems();
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                closeLightbox();
+                closeEditModal();
+                closeViewer();
+            }
+        });
+    </script>
+</body>
+</html>

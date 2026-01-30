@@ -643,6 +643,854 @@ def api_to_narrative():
     })
 
 
+# ============== Library Routes ==============
+
+@app.route('/api/libraries', methods=['POST'])
+def api_create_library():
+    """
+    Create a new object library from a text list.
+
+    Request body:
+    {
+        "name": "My Objects",
+        "objects": "red apple\\nwooden chair\\nblue vase"
+    }
+
+    Response:
+    {
+        "library_id": "abc123",
+        "items_created": 3,
+        "jobs_queued": 9,
+        "success": true
+    }
+    """
+    data = request.get_json()
+    name = data.get('name', 'Untitled Library')
+    objects_text = data.get('objects', '')
+    variants = int(data.get('variants', 3))
+
+    if not objects_text.strip():
+        return jsonify({"error": "No objects provided", "success": False}), 400
+
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    try:
+        library_id = db.create_library(name, objects_text, variants_per_item=variants)
+        library = db.get_library(library_id)
+
+        return jsonify({
+            "library_id": library_id,
+            "name": name,
+            "items_created": library["item_count"],
+            "jobs_queued": library["total_variants"],
+            "success": True
+        })
+    except Exception as e:
+        logger.error(f"Failed to create library: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route('/api/libraries', methods=['GET'])
+def api_list_libraries():
+    """List all libraries"""
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "libraries": []})
+
+    libraries = db.list_libraries()
+    for lib in libraries:
+        lib['_id'] = str(lib['_id'])
+        if 'created_at' in lib:
+            lib['created_at'] = lib['created_at'].isoformat()
+        if 'completed_at' in lib and lib['completed_at']:
+            lib['completed_at'] = lib['completed_at'].isoformat()
+
+    return jsonify({"libraries": libraries, "count": len(libraries), "success": True})
+
+
+@app.route('/api/libraries/<library_id>', methods=['GET'])
+def api_get_library(library_id):
+    """Get a library with its items"""
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available"}), 503
+
+    library = db.get_library(library_id)
+    if not library:
+        return jsonify({"error": "Library not found"}), 404
+
+    items = db.get_library_items(library_id)
+
+    # Format for JSON
+    library['_id'] = str(library['_id'])
+    if 'created_at' in library:
+        library['created_at'] = library['created_at'].isoformat()
+    if 'completed_at' in library and library['completed_at']:
+        library['completed_at'] = library['completed_at'].isoformat()
+
+    for item in items:
+        item['_id'] = str(item['_id'])
+        if 'created_at' in item:
+            item['created_at'] = item['created_at'].isoformat()
+        # Remove embeddings from response (too large)
+        item.pop('text_embedding', None)
+        item.pop('image_embedding', None)
+
+    # Count items by status
+    status_counts = {}
+    for item in items:
+        status = item.get('status', 'unknown')
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+    return jsonify({
+        "library": library,
+        "items": items,
+        "status_counts": status_counts,
+        "success": True
+    })
+
+
+def _path_to_url(path):
+    """Convert a filesystem path to a web URL."""
+    if not path:
+        return None
+
+    # Normalize slashes to forward slashes
+    path = path.replace("\\", "/")
+
+    # Already a URL
+    if path.startswith("/media/"):
+        return path
+
+    # Find the media/generated portion and extract relative path
+    if "media/generated/" in path:
+        idx = path.index("media/generated/")
+        return "/" + path[idx:]
+
+    # Path is just "generated/..." without media prefix
+    if path.startswith("generated/"):
+        return "/media/" + path
+
+    # Path starts with sd_ or mesh_ directly (relative to generated/)
+    if path.startswith("sd_") or path.startswith("mesh_") or path.startswith("splat_"):
+        return "/media/generated/" + path
+
+    # Fallback: assume it's relative to media
+    return "/media/" + path
+
+
+def _item_to_api_response(item):
+    """
+    Convert a library item to a clean API response format.
+    Transforms filesystem paths to web URLs and removes internal fields.
+    """
+    result = {
+        "id": str(item.get("_id", "")),
+        "description": item.get("description", ""),
+        "status": item.get("status", ""),
+        "seed": item.get("seed"),
+        "library_id": item.get("library_id", ""),
+        "variant_group_id": item.get("variant_group_id", ""),
+    }
+
+    # Convert image path to web URL
+    image_url = _path_to_url(item.get("image_path"))
+    if image_url:
+        result["image_url"] = image_url
+
+    # Convert asset path to web URL
+    asset_url = _path_to_url(item.get("asset_path"))
+    if asset_url:
+        result["asset_url"] = asset_url
+        result["asset_type"] = item.get("asset_type", "mesh")
+
+    # Include similarity score if present (from search results)
+    if "similarity" in item:
+        result["similarity"] = item["similarity"]
+
+    return result
+
+
+@app.route('/api/library/items/<item_id>', methods=['GET'])
+def api_get_library_item(item_id):
+    """
+    Get a single library item by ID.
+
+    Response:
+    {
+        "item": {
+            "id": "abc123",
+            "description": "red apple",
+            "status": "ready",
+            "image_url": "/media/generated/sd_xxx/image.png",
+            "asset_url": "/media/generated/mesh_xxx.glb",
+            "asset_type": "mesh"
+        },
+        "success": true
+    }
+    """
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    item = db.library_items.find_one({"_id": item_id})
+    if not item:
+        return jsonify({"error": "Item not found", "success": False}), 404
+
+    return jsonify({
+        "item": _item_to_api_response(item),
+        "success": True
+    })
+
+
+@app.route('/api/libraries/search', methods=['POST'])
+def api_search_libraries():
+    """
+    Search libraries using text, image, or combined vector similarity.
+
+    Request body:
+    {
+        "query": "comfortable seating",      // Text query (optional if image provided)
+        "image_url": "/media/...",           // Image URL for visual search (optional)
+        "image_base64": "...",               // Base64-encoded image (optional)
+        "mode": "vector",                    // "text", "vector", or "image"
+        "embedding_field": "text_embedding", // "text_embedding" or "image_embedding"
+        "use_faiss": true,                   // Use FAISS index for speed (default: true)
+        "limit": 10,
+        "library_id": "optional",
+        "status": "ready"
+    }
+
+    Response:
+    {
+        "results": [
+            {
+                "id": "abc123",
+                "description": "red sofa",
+                "image_url": "/media/generated/...",
+                "asset_url": "/media/generated/...",
+                "asset_type": "mesh",
+                "similarity": 0.85
+            }
+        ],
+        "count": 1,
+        "mode": "vector",
+        "success": true
+    }
+    """
+    data = request.get_json()
+    query = data.get('query', '')
+    image_url = data.get('image_url', '')
+    image_base64 = data.get('image_base64', '')
+    mode = data.get('mode', 'vector')
+    embedding_field = data.get('embedding_field', 'text_embedding')
+    use_faiss = data.get('use_faiss', True)
+    limit = int(data.get('limit', 10))
+    library_id = data.get('library_id')
+    status_filter = data.get('status', 'ready')
+
+    # Validate input
+    has_text = bool(query.strip())
+    has_image = bool(image_url or image_base64)
+
+    if mode == 'text' and not has_text:
+        return jsonify({"error": "No query provided for text search", "success": False}), 400
+    if mode == 'image' and not has_image:
+        return jsonify({"error": "No image provided for image search", "success": False}), 400
+    if mode == 'vector' and not has_text and not has_image:
+        return jsonify({"error": "No query or image provided", "success": False}), 400
+
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    try:
+        if mode == 'text':
+            # Simple text search
+            results = db.search_library_text(query, limit=limit, library_id=library_id)
+        else:
+            # Vector similarity search
+            from services.embedding_service import get_embedding_service
+            embedding_service = get_embedding_service()
+
+            query_embedding = None
+
+            if has_image:
+                # Image-based search
+                embedding_field = 'image_embedding'
+                query_embedding = _encode_image_query(embedding_service, image_url, image_base64)
+            elif has_text:
+                # Text-based search
+                query_embedding = embedding_service.encode_text(query)
+
+            if query_embedding is None:
+                return jsonify({"error": "Failed to encode query", "success": False}), 500
+
+            # Try FAISS if available and requested
+            if use_faiss:
+                try:
+                    from services.faiss_service import get_faiss_service
+                    faiss_svc = get_faiss_service()
+
+                    # FAISS search returns {id, similarity}
+                    faiss_results = faiss_svc.search(
+                        query_embedding,
+                        k=limit * 2,  # Over-fetch to account for status filtering
+                        library_id=library_id,
+                        embedding_field=embedding_field
+                    )
+
+                    # Fetch full items from database
+                    item_ids = [r['id'] for r in faiss_results]
+                    similarity_map = {r['id']: r['similarity'] for r in faiss_results}
+
+                    results = []
+                    for item_id in item_ids:
+                        item = db.library_items.find_one({"_id": item_id})
+                        if item:
+                            item['similarity'] = similarity_map.get(item_id, 0)
+                            results.append(item)
+
+                except Exception as faiss_err:
+                    logger.warning(f"FAISS search failed, falling back to brute force: {faiss_err}")
+                    results = db.search_library_vector(
+                        query_embedding,
+                        embedding_field=embedding_field,
+                        limit=limit,
+                        library_id=library_id
+                    )
+            else:
+                # Direct database search (brute force)
+                results = db.search_library_vector(
+                    query_embedding,
+                    embedding_field=embedding_field,
+                    limit=limit,
+                    library_id=library_id
+                )
+
+        # Filter by status if specified
+        if status_filter:
+            results = [r for r in results if r.get('status') == status_filter]
+
+        # Limit results
+        results = results[:limit]
+
+        # Convert to clean API format
+        formatted_results = [_item_to_api_response(item) for item in results]
+
+        return jsonify({
+            "results": formatted_results,
+            "count": len(formatted_results),
+            "mode": mode,
+            "embedding_field": embedding_field if mode != 'text' else None,
+            "success": True
+        })
+
+    except Exception as e:
+        logger.error(f"Search failed: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+def _encode_image_query(embedding_service, image_url: str, image_base64: str):
+    """
+    Encode an image query to embedding vector.
+    Supports local file URLs and base64-encoded images.
+    """
+    import tempfile
+    import base64
+
+    if image_base64:
+        # Decode base64 image to temp file
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
+            f.write(base64.b64decode(image_base64))
+            temp_path = f.name
+
+        try:
+            return embedding_service.encode_image(temp_path)
+        finally:
+            os.unlink(temp_path)
+
+    elif image_url:
+        # Handle local media URLs
+        if image_url.startswith('/media/'):
+            local_path = os.path.join(MEDIA_FOLDER, image_url[7:])
+            if os.path.exists(local_path):
+                return embedding_service.encode_image(local_path)
+            else:
+                raise ValueError(f"Image not found: {local_path}")
+        else:
+            # Download remote image
+            import requests as req
+            import tempfile
+
+            response = req.get(image_url, timeout=30)
+            response.raise_for_status()
+
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
+                f.write(response.content)
+                temp_path = f.name
+
+            try:
+                return embedding_service.encode_image(temp_path)
+            finally:
+                os.unlink(temp_path)
+
+    return None
+
+
+# ============== Library Review Routes ==============
+
+@app.route('/api/libraries/<library_id>/review', methods=['GET'])
+def api_get_review_items(library_id):
+    """
+    Get items needing review, grouped by description.
+
+    Query params:
+        status: Filter by status (default: needs_review)
+
+    Response:
+    {
+        "groups": [
+            {
+                "variant_group_id": "abc123",
+                "description": "red apple",
+                "variants": [...]
+            }
+        ],
+        "total_pending": 15,
+        "success": true
+    }
+    """
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    status = request.args.get('status', 'needs_review')
+
+    try:
+        groups = db.get_items_for_review(library_id, status=status)
+
+        # Format for JSON
+        for group in groups:
+            for variant in group.get('variants', []):
+                variant['_id'] = str(variant['_id'])
+                if 'created_at' in variant:
+                    variant['created_at'] = variant['created_at'].isoformat()
+                if 'reviewed_at' in variant and variant['reviewed_at']:
+                    variant['reviewed_at'] = variant['reviewed_at'].isoformat()
+                # Remove embeddings from response
+                variant.pop('text_embedding', None)
+                variant.pop('image_embedding', None)
+
+        total_pending = db.count_library_items_by_stage("needs_review")
+
+        return jsonify({
+            "groups": groups,
+            "total_pending": total_pending,
+            "success": True
+        })
+
+    except Exception as e:
+        logger.error(f"Failed to get review items: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route('/api/libraries/<library_id>/stats', methods=['GET'])
+def api_library_stats(library_id):
+    """
+    Get processing statistics for a library.
+
+    Response:
+    {
+        "pending": 0,
+        "needs_review": 15,
+        "approved": 3,
+        ...
+        "success": true
+    }
+    """
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    try:
+        stats = db.get_library_stats(library_id)
+        return jsonify({**stats, "success": True})
+
+    except Exception as e:
+        logger.error(f"Failed to get library stats: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route('/api/libraries/items/<item_id>/approve', methods=['POST'])
+def api_approve_item(item_id):
+    """
+    Approve an item for continued processing.
+
+    Request body (optional):
+    { "reviewer": "name" }
+    """
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    data = request.get_json() or {}
+    reviewer = data.get('reviewer')
+
+    try:
+        success = db.approve_item(item_id, reviewer=reviewer)
+        if success:
+            return jsonify({"status": "approved", "success": True})
+        else:
+            return jsonify({"error": "Item not found or not in needs_review status", "success": False}), 404
+
+    except Exception as e:
+        logger.error(f"Failed to approve item: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route('/api/libraries/items/<item_id>/reject', methods=['POST'])
+def api_reject_item(item_id):
+    """
+    Reject an item.
+
+    Request body (optional):
+    { "reviewer": "name", "notes": "reason" }
+    """
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    data = request.get_json() or {}
+    reviewer = data.get('reviewer')
+    notes = data.get('notes')
+
+    try:
+        success = db.reject_item(item_id, reviewer=reviewer, notes=notes)
+        if success:
+            return jsonify({"status": "rejected", "success": True})
+        else:
+            return jsonify({"error": "Item not found", "success": False}), 404
+
+    except Exception as e:
+        logger.error(f"Failed to reject item: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route('/api/libraries/items/<item_id>/reset', methods=['POST'])
+def api_reset_item(item_id):
+    """
+    Reset a rejected or failed item for regeneration.
+    Clears image/mask/asset and assigns a new seed.
+    """
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    data = request.get_json() or {}
+    new_seed = data.get('new_seed', True)
+
+    try:
+        success = db.reset_item_for_regeneration(item_id, new_seed=new_seed)
+        if success:
+            return jsonify({"status": "pending", "success": True})
+        else:
+            return jsonify({"error": "Item not found", "success": False}), 404
+
+    except Exception as e:
+        logger.error(f"Failed to reset item: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route('/api/libraries/items/<item_id>/retry', methods=['POST'])
+def api_retry_item(item_id):
+    """
+    Retry a stuck processing item (keeps image, resets to approved).
+    Use this for items stuck at needs_mask, needs_3d, or needs_embedding.
+    """
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    try:
+        success = db.retry_stuck_item(item_id)
+        if success:
+            return jsonify({"status": "approved", "success": True})
+        else:
+            return jsonify({"error": "Item not found or not in processing state", "success": False}), 404
+
+    except Exception as e:
+        logger.error(f"Failed to retry item: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route('/api/libraries/groups/<group_id>/reset', methods=['POST'])
+def api_reset_group(group_id):
+    """
+    Reset all rejected/failed items in a group for regeneration.
+    """
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    data = request.get_json() or {}
+    new_seeds = data.get('new_seeds', True)
+
+    try:
+        count = db.reset_group_for_regeneration(group_id, new_seeds=new_seeds)
+        return jsonify({"reset_count": count, "success": True})
+
+    except Exception as e:
+        logger.error(f"Failed to reset group: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route('/api/libraries/items/<item_id>/description', methods=['PUT'])
+def api_update_description(item_id):
+    """
+    Update item description/prompt.
+
+    Request body:
+    { "description": "new prompt text" }
+    """
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    data = request.get_json()
+    if not data or 'description' not in data:
+        return jsonify({"error": "description required", "success": False}), 400
+
+    try:
+        result = db.update_item_description(item_id, data['description'])
+        return jsonify({**result, "success": True})
+
+    except Exception as e:
+        logger.error(f"Failed to update description: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route('/api/libraries/items/<item_id>/regenerate', methods=['POST'])
+def api_regenerate_item(item_id):
+    """
+    Create a new variant with different seed.
+
+    Request body (optional):
+    { "seed": 12345 }
+    """
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    data = request.get_json() or {}
+    seed = data.get('seed')
+
+    try:
+        new_item_id = db.create_variant(item_id, seed=seed)
+        return jsonify({
+            "new_item_id": new_item_id,
+            "success": True
+        })
+
+    except ValueError as e:
+        return jsonify({"error": str(e), "success": False}), 404
+    except Exception as e:
+        logger.error(f"Failed to create variant: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route('/api/libraries/items/<item_id>', methods=['DELETE'])
+def api_delete_item(item_id):
+    """Delete an item from the library."""
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    try:
+        success = db.delete_item(item_id)
+        if success:
+            return jsonify({"deleted": True, "success": True})
+        else:
+            return jsonify({"error": "Item not found", "success": False}), 404
+
+    except Exception as e:
+        logger.error(f"Failed to delete item: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route('/api/libraries/groups/<group_id>', methods=['DELETE'])
+def api_delete_group(group_id):
+    """Delete all variants in a group."""
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    try:
+        count = db.delete_group(group_id)
+        return jsonify({
+            "deleted_count": count,
+            "success": True
+        })
+
+    except Exception as e:
+        logger.error(f"Failed to delete group: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route('/api/libraries/groups/<group_id>/approve-all', methods=['POST'])
+def api_approve_group(group_id):
+    """Approve all variants in a group."""
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    data = request.get_json() or {}
+    reviewer = data.get('reviewer')
+
+    try:
+        count = db.approve_group(group_id, reviewer=reviewer)
+        return jsonify({
+            "approved_count": count,
+            "success": True
+        })
+
+    except Exception as e:
+        logger.error(f"Failed to approve group: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route('/api/libraries/groups/<group_id>/reject-all', methods=['POST'])
+def api_reject_group(group_id):
+    """Reject all variants in a group."""
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    data = request.get_json() or {}
+    reviewer = data.get('reviewer')
+    notes = data.get('notes')
+
+    try:
+        count = db.reject_group(group_id, reviewer=reviewer, notes=notes)
+        return jsonify({
+            "rejected_count": count,
+            "success": True
+        })
+
+    except Exception as e:
+        logger.error(f"Failed to reject group: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route('/api/libraries/groups/<group_id>/description', methods=['PUT'])
+def api_update_group_description(group_id):
+    """Update description for all items in a variant group."""
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    data = request.get_json()
+    if not data or 'description' not in data:
+        return jsonify({"error": "Missing description", "success": False}), 400
+
+    try:
+        result = db.update_group_description(group_id, data['description'])
+        if result.get("updated"):
+            return jsonify({
+                "updated_count": result.get("updated_count", 0),
+                "success": True
+            })
+        else:
+            return jsonify({"error": result.get("error", "Update failed"), "success": False}), 404
+
+    except Exception as e:
+        logger.error(f"Failed to update group description: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route('/library-review/<library_id>')
+def library_review_page(library_id):
+    """Library review UI page."""
+    db = get_db()
+    if not db:
+        return "Database not available", 503
+
+    library = db.get_library(library_id)
+    if not library:
+        return "Library not found", 404
+
+    return render_template('library_review.html', library=library)
+
+
+@app.route('/library-search')
+def library_search_page():
+    """Library search test page - text and image search with gallery view."""
+    return render_template('library_search.html')
+
+
+# ============== FAISS Index Management ==============
+
+@app.route('/api/faiss/rebuild', methods=['POST'])
+def api_faiss_rebuild():
+    """
+    Rebuild FAISS indices from database.
+
+    Request body (optional):
+    {
+        "library_id": "optional - rebuild for specific library",
+        "embedding_field": "text_embedding"  // or "image_embedding" or "all"
+    }
+    """
+    data = request.get_json() or {}
+    library_id = data.get('library_id')
+    embedding_field = data.get('embedding_field', 'all')
+
+    try:
+        from services.faiss_service import get_faiss_service, reset_faiss_service
+
+        # Reset to get fresh service
+        reset_faiss_service()
+        faiss_svc = get_faiss_service()
+
+        if embedding_field == 'all':
+            faiss_svc.build_index(library_id, "text_embedding")
+            faiss_svc.build_index(library_id, "image_embedding")
+        else:
+            faiss_svc.build_index(library_id, embedding_field)
+
+        stats = faiss_svc.get_stats()
+
+        return jsonify({
+            "rebuilt": True,
+            "stats": stats,
+            "success": True
+        })
+
+    except Exception as e:
+        logger.error(f"FAISS rebuild failed: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route('/api/faiss/stats', methods=['GET'])
+def api_faiss_stats():
+    """Get FAISS index statistics."""
+    try:
+        from services.faiss_service import get_faiss_service
+        faiss_svc = get_faiss_service()
+        stats = faiss_svc.get_stats()
+
+        return jsonify({
+            "stats": stats,
+            "success": True
+        })
+
+    except Exception as e:
+        logger.error(f"Failed to get FAISS stats: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
 # ============== Media Routes ==============
 
 @app.route('/media/<path:filename>')

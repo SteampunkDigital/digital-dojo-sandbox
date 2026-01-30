@@ -30,3 +30,16 @@ plyfile>=1.0.0
 # pip install diffusers transformers accelerate
 
 # Note: SAM3D dependencies should be installed from the SAM3D repo
+
+# Embeddings for library search
+# OpenCLIP (default): open_clip_torch
+# FLAIR (fine-grained): transformers (uses xiaorui638/flair from HuggingFace)
+open_clip_torch>=2.24.0
+transformers>=4.36.0
+numpy>=1.24.0
+
+# FAISS for fast similarity search
+# Use faiss-gpu if you have CUDA, otherwise faiss-cpu
+# pip install faiss-gpu (CUDA 11.x/12.x)
+# pip install faiss-cpu (CPU only)
+faiss-gpu>=1.7.4

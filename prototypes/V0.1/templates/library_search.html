@@ -1,0 +1,727 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Library Search</title>
+    <link rel="icon" href="data:,">
+    <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.4.0/model-viewer.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html, body {
+            height: 100%;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1e1e1e;
+            color: #ccc;
+        }
+
+        .toolbar {
+            height: 48px;
+            background: #2d2d2d;
+            border-bottom: 1px solid #404040;
+            display: flex;
+            align-items: center;
+            padding: 0 16px;
+            gap: 12px;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .toolbar h1 {
+            font-size: 14px;
+            font-weight: 500;
+            color: #ccc;
+        }
+
+        .toolbar-spacer {
+            flex: 1;
+        }
+
+        .search-container {
+            padding: 24px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .search-panel {
+            display: grid;
+            grid-template-columns: 1fr 300px;
+            gap: 24px;
+            margin-bottom: 32px;
+        }
+
+        .text-search {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .text-search label {
+            font-size: 13px;
+            color: #888;
+        }
+
+        .text-search input {
+            padding: 12px 16px;
+            background: #2d2d2d;
+            border: 1px solid #404040;
+            border-radius: 6px;
+            color: #fff;
+            font-size: 16px;
+            outline: none;
+            transition: border-color 0.15s;
+        }
+
+        .text-search input:focus {
+            border-color: #0e639c;
+        }
+
+        .text-search input::placeholder {
+            color: #666;
+        }
+
+        .image-drop {
+            border: 2px dashed #404040;
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+            cursor: pointer;
+            transition: all 0.15s;
+            min-height: 150px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .image-drop:hover, .image-drop.drag-over {
+            border-color: #0e639c;
+            background: rgba(14, 99, 156, 0.1);
+        }
+
+        .image-drop.has-image {
+            border-style: solid;
+            border-color: #4caf50;
+        }
+
+        .image-drop .drop-icon {
+            font-size: 32px;
+            color: #555;
+            margin-bottom: 8px;
+        }
+
+        .image-drop .drop-text {
+            font-size: 13px;
+            color: #888;
+            text-align: center;
+        }
+
+        .image-drop img {
+            max-width: 100%;
+            max-height: 140px;
+            border-radius: 4px;
+        }
+
+        .image-drop .clear-btn {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            width: 24px;
+            height: 24px;
+            border-radius: 12px;
+            background: #f44336;
+            border: none;
+            color: white;
+            font-size: 14px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .search-actions {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            margin-top: 8px;
+        }
+
+        .search-actions button {
+            padding: 12px 24px;
+            background: #0e639c;
+            border: none;
+            border-radius: 6px;
+            color: white;
+            font-size: 14px;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        .search-actions button:hover {
+            background: #1177bb;
+        }
+
+        .search-actions button:disabled {
+            background: #3c3c3c;
+            cursor: not-allowed;
+        }
+
+        .search-options {
+            display: flex;
+            gap: 16px;
+            align-items: center;
+            font-size: 13px;
+            color: #888;
+        }
+
+        .search-options label {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+        }
+
+        .search-options select {
+            padding: 6px 12px;
+            background: #2d2d2d;
+            border: 1px solid #404040;
+            border-radius: 4px;
+            color: #ccc;
+            font-size: 13px;
+        }
+
+        .status-bar {
+            padding: 12px 16px;
+            background: #252525;
+            border-radius: 6px;
+            margin-bottom: 24px;
+            font-size: 13px;
+            color: #888;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .status-bar.loading {
+            color: #ff9800;
+        }
+
+        .status-bar.success {
+            color: #4caf50;
+        }
+
+        .status-bar.error {
+            color: #f44336;
+        }
+
+        .spinner {
+            width: 16px;
+            height: 16px;
+            border: 2px solid #404040;
+            border-top-color: #ff9800;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .results-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 16px;
+        }
+
+        .result-card {
+            background: #252525;
+            border-radius: 8px;
+            overflow: hidden;
+            transition: transform 0.15s, box-shadow 0.15s;
+            cursor: pointer;
+            border: 1px solid #333;
+        }
+
+        .result-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+            border-color: #0e639c;
+        }
+
+        .result-card.selected {
+            border-color: #4caf50;
+            box-shadow: 0 0 0 2px rgba(76, 175, 80, 0.3);
+        }
+
+        .result-card .model-container {
+            width: 100%;
+            aspect-ratio: 1;
+            background: linear-gradient(135deg, #1a1a1a 0%, #252525 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .result-card model-viewer {
+            width: 100%;
+            height: 100%;
+            --poster-color: transparent;
+        }
+
+        .result-card .card-info {
+            padding: 12px;
+            background: #2d2d2d;
+        }
+
+        .result-card .description {
+            font-size: 12px;
+            color: #aaa;
+            line-height: 1.3;
+            margin-bottom: 6px;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+            height: 32px;
+        }
+
+        .result-card .meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 11px;
+            color: #666;
+        }
+
+        .result-card .similarity {
+            background: #0e639c;
+            color: white;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-weight: 500;
+            font-size: 11px;
+        }
+
+        .result-card .similarity.high {
+            background: #2e7d32;
+        }
+
+        .result-card .similarity.medium {
+            background: #ed6c02;
+        }
+
+        .result-card .similarity.low {
+            background: #666;
+        }
+
+        .result-card .rank {
+            position: absolute;
+            top: 8px;
+            left: 8px;
+            background: rgba(0,0,0,0.7);
+            color: #fff;
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 11px;
+            font-weight: 500;
+        }
+
+        .view-toggle {
+            display: flex;
+            gap: 4px;
+            background: #252525;
+            padding: 4px;
+            border-radius: 6px;
+        }
+
+        .view-toggle button {
+            padding: 6px 12px;
+            background: transparent;
+            border: none;
+            border-radius: 4px;
+            color: #888;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .view-toggle button.active {
+            background: #0e639c;
+            color: white;
+        }
+
+        .no-model {
+            color: #555;
+            font-size: 12px;
+            text-align: center;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 64px 32px;
+            color: #666;
+        }
+
+        .empty-state .icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+        }
+
+        .hidden-input {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="toolbar">
+        <h1>Library Search</h1>
+        <div class="toolbar-spacer"></div>
+        <div class="view-toggle">
+            <button class="active" data-view="3d">3D Models</button>
+            <button data-view="image">Images</button>
+        </div>
+    </div>
+
+    <div class="search-container">
+        <div class="search-panel">
+            <div class="text-search">
+                <label>Search by text description</label>
+                <input type="text" id="searchInput" placeholder="e.g., comfortable wooden chair, red ceramic vase..." autofocus>
+                <div class="search-actions">
+                    <button id="searchBtn">Search</button>
+                    <div class="search-options">
+                        <label>
+                            Limit:
+                            <select id="limitSelect">
+                                <option value="10">10</option>
+                                <option value="20" selected>20</option>
+                                <option value="50">50</option>
+                                <option value="100">100</option>
+                            </select>
+                        </label>
+                        <label>
+                            <input type="checkbox" id="useFaiss" checked>
+                            Use FAISS
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="image-drop" id="imageDrop">
+                <div class="drop-icon">+</div>
+                <div class="drop-text">Drop image here<br>or click to upload</div>
+            </div>
+        </div>
+
+        <div class="status-bar" id="statusBar">
+            Enter a search query or drop an image to find similar items
+        </div>
+
+        <div class="results-grid" id="resultsGrid">
+            <div class="empty-state">
+                <div class="icon">&#x1F50D;</div>
+                <p>Search results will appear here</p>
+            </div>
+        </div>
+    </div>
+
+    <input type="file" id="fileInput" class="hidden-input" accept="image/*">
+
+    <script>
+        const searchInput = document.getElementById('searchInput');
+        const searchBtn = document.getElementById('searchBtn');
+        const imageDrop = document.getElementById('imageDrop');
+        const fileInput = document.getElementById('fileInput');
+        const statusBar = document.getElementById('statusBar');
+        const resultsGrid = document.getElementById('resultsGrid');
+        const limitSelect = document.getElementById('limitSelect');
+        const useFaissCheckbox = document.getElementById('useFaiss');
+        const viewToggle = document.querySelector('.view-toggle');
+
+        let uploadedImage = null;
+        let currentView = '3d';
+
+        // View toggle
+        viewToggle.addEventListener('click', (e) => {
+            if (e.target.tagName === 'BUTTON') {
+                viewToggle.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+                e.target.classList.add('active');
+                currentView = e.target.dataset.view;
+                updateResultsView();
+            }
+        });
+
+        // Search on enter
+        searchInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                performSearch();
+            }
+        });
+
+        searchBtn.addEventListener('click', performSearch);
+
+        // Image drop handling
+        imageDrop.addEventListener('click', () => fileInput.click());
+
+        imageDrop.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            imageDrop.classList.add('drag-over');
+        });
+
+        imageDrop.addEventListener('dragleave', () => {
+            imageDrop.classList.remove('drag-over');
+        });
+
+        imageDrop.addEventListener('drop', (e) => {
+            e.preventDefault();
+            imageDrop.classList.remove('drag-over');
+            const file = e.dataTransfer.files[0];
+            if (file && file.type.startsWith('image/')) {
+                handleImageFile(file);
+            }
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                handleImageFile(file);
+            }
+        });
+
+        function handleImageFile(file) {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                uploadedImage = e.target.result.split(',')[1]; // base64 data
+                imageDrop.innerHTML = `
+                    <img src="${e.target.result}" alt="Uploaded image">
+                    <button class="clear-btn" onclick="clearImage(event)">x</button>
+                `;
+                imageDrop.classList.add('has-image');
+
+                // Auto-search when image is dropped
+                performSearch();
+            };
+            reader.readAsDataURL(file);
+        }
+
+        window.clearImage = function(e) {
+            e.stopPropagation();
+            uploadedImage = null;
+            imageDrop.innerHTML = `
+                <div class="drop-icon">+</div>
+                <div class="drop-text">Drop image here<br>or click to upload</div>
+            `;
+            imageDrop.classList.remove('has-image');
+            fileInput.value = '';
+        };
+
+        async function performSearch() {
+            const query = searchInput.value.trim();
+            const hasImage = uploadedImage !== null;
+
+            if (!query && !hasImage) {
+                setStatus('Please enter a search query or drop an image', 'error');
+                return;
+            }
+
+            const limit = parseInt(limitSelect.value);
+            const useFaiss = useFaissCheckbox.checked;
+
+            setStatus('Searching...', 'loading');
+
+            try {
+                const body = {
+                    limit: limit,
+                    use_faiss: useFaiss,
+                    status: 'ready'
+                };
+
+                if (hasImage) {
+                    body.image_base64 = uploadedImage;
+                    body.mode = 'image';
+                }
+
+                if (query) {
+                    body.query = query;
+                    if (!hasImage) {
+                        body.mode = 'vector';
+                    }
+                }
+
+                const response = await fetch('/api/libraries/search', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    displayResults(data.results);
+                    const searchType = hasImage ? 'image' : 'text';
+                    setStatus(`Found ${data.count} results (${searchType} search, ${useFaiss ? 'FAISS' : 'brute-force'})`, 'success');
+                } else {
+                    setStatus(`Error: ${data.error}`, 'error');
+                    displayResults([]);
+                }
+            } catch (error) {
+                console.error('Search error:', error);
+                setStatus(`Error: ${error.message}`, 'error');
+                displayResults([]);
+            }
+        }
+
+        function setStatus(message, type = '') {
+            statusBar.className = 'status-bar';
+            if (type) {
+                statusBar.classList.add(type);
+            }
+
+            if (type === 'loading') {
+                statusBar.innerHTML = `<div class="spinner"></div> ${message}`;
+            } else {
+                statusBar.textContent = message;
+            }
+        }
+
+        let currentResults = [];
+
+        function displayResults(results) {
+            currentResults = results;
+            updateResultsView();
+        }
+
+        function updateResultsView() {
+            if (currentResults.length === 0) {
+                resultsGrid.innerHTML = `
+                    <div class="empty-state">
+                        <div class="icon">O</div>
+                        <p>No results found</p>
+                    </div>
+                `;
+                return;
+            }
+
+            resultsGrid.innerHTML = currentResults.map((item, index) => {
+                const similarity = item.similarity || 0;
+                const simClass = similarity > 0.7 ? 'high' : similarity > 0.5 ? 'medium' : 'low';
+                const simPercent = (similarity * 100).toFixed(0);
+
+                const imageUrl = item.image_url || '';
+                const assetUrl = item.asset_url || '';
+
+                let mediaContent;
+                if (currentView === '3d' && assetUrl) {
+                    // Show 3D model with fallback to image on error
+                    const fallbackImg = imageUrl ?
+                        `<img src="${imageUrl}" class="fallback-img" style="width:100%;height:100%;object-fit:cover;display:none;">` :
+                        `<div class="no-model fallback-img" style="display:none;">Load failed</div>`;
+                    mediaContent = `
+                        <span class="rank">#${index + 1}</span>
+                        <model-viewer
+                            src="${assetUrl}"
+                            data-fallback="${item.id}"
+                            auto-rotate
+                            camera-controls
+                            shadow-intensity="0.5"
+                            exposure="1.2"
+                            environment-image="neutral">
+                        </model-viewer>
+                        ${fallbackImg}
+                    `;
+                } else if (imageUrl) {
+                    // Show image
+                    mediaContent = `
+                        <span class="rank">#${index + 1}</span>
+                        <img src="${imageUrl}" alt="${item.description}" loading="lazy"
+                             style="width:100%;height:100%;object-fit:cover;">
+                    `;
+                } else {
+                    // No asset available
+                    mediaContent = `
+                        <span class="rank">#${index + 1}</span>
+                        <div class="no-model">No asset</div>
+                    `;
+                }
+
+                return `
+                    <div class="result-card" data-id="${item.id}">
+                        <div class="model-container">
+                            ${mediaContent}
+                        </div>
+                        <div class="card-info">
+                            <div class="description" title="${escapeHtml(item.description || '')}">${escapeHtml(item.description || 'No description')}</div>
+                            <div class="meta">
+                                <span>${item.asset_type || 'mesh'}</span>
+                                <span class="similarity ${simClass}">${simPercent}%</span>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Copy text to clipboard with fallback for non-HTTPS
+        function copyToClipboard(text) {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                return navigator.clipboard.writeText(text);
+            }
+            // Fallback for HTTP contexts
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.style.position = 'fixed';
+            textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            textarea.select();
+            try {
+                document.execCommand('copy');
+            } catch (err) {
+                console.error('Copy failed:', err);
+            }
+            document.body.removeChild(textarea);
+            return Promise.resolve();
+        }
+
+        // Click on result card to copy asset URL
+        resultsGrid.addEventListener('click', (e) => {
+            const card = e.target.closest('.result-card');
+            if (card) {
+                const item = currentResults.find(r => r.id === card.dataset.id);
+                if (item && item.asset_url) {
+                    copyToClipboard(window.location.origin + item.asset_url);
+                    setStatus(`Copied asset URL to clipboard: ${item.asset_url}`, 'success');
+                }
+            }
+        });
+
+        // Handle model-viewer load errors - show fallback image
+        resultsGrid.addEventListener('error', (e) => {
+            if (e.target.tagName === 'MODEL-VIEWER') {
+                const container = e.target.closest('.model-container');
+                if (container) {
+                    e.target.style.display = 'none';
+                    const fallback = container.querySelector('.fallback-img');
+                    if (fallback) {
+                        fallback.style.display = 'block';
+                    }
+                }
+            }
+        }, true);
+    </script>
+</body>
+</html>
