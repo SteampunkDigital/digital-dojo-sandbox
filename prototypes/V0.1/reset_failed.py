@@ -14,6 +14,7 @@ from services.database import DatabaseService
 def main():
     parser = argparse.ArgumentParser(description="Reset failed library items")
     parser.add_argument('--stage', default='needs_3d',
+                        choices=['pending', 'needs_3d', 'needs_embedding'],
                         help='Stage to reset to (default: needs_3d)')
     parser.add_argument('--dry-run', action='store_true',
                         help='Show what would be reset without changing')

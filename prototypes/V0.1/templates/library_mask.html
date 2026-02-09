@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mask Object - {{ item.description }}</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body {
+            height: 100%;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1e1e1e;
+            color: #ccc;
+            overflow: hidden;
+        }
+
+        .toolbar {
+            height: 48px;
+            background: #2d2d2d;
+            border-bottom: 1px solid #404040;
+            display: flex;
+            align-items: center;
+            padding: 0 16px;
+            gap: 12px;
+        }
+
+        .toolbar a, .toolbar button {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            font-size: 13px;
+            cursor: pointer;
+            text-decoration: none;
+            transition: background 0.15s;
+        }
+
+        .toolbar a {
+            background: #3c3c3c;
+            color: #ccc;
+        }
+
+        .toolbar a:hover {
+            background: #4c4c4c;
+        }
+
+        .toolbar .description {
+            flex: 1;
+            font-size: 14px;
+            color: #fff;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .toolbar button.primary {
+            background: #0e639c;
+            color: white;
+        }
+
+        .toolbar button.primary:hover {
+            background: #1177bb;
+        }
+
+        .toolbar button.primary:disabled {
+            background: #555;
+            cursor: not-allowed;
+        }
+
+        .toolbar button.secondary {
+            background: #3c3c3c;
+            color: #ccc;
+        }
+
+        .toolbar button.secondary:hover {
+            background: #4c4c4c;
+        }
+
+        .toolbar button.danger {
+            background: #c62828;
+            color: white;
+        }
+
+        .toolbar button.danger:hover {
+            background: #e53935;
+        }
+
+        .canvas-container {
+            width: 100%;
+            height: calc(100vh - 48px - 36px);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #1a1a1a;
+            position: relative;
+        }
+
+        canvas {
+            cursor: crosshair;
+            max-width: 100%;
+            max-height: 100%;
+        }
+
+        .status-bar {
+            height: 36px;
+            background: #2d2d2d;
+            border-top: 1px solid #404040;
+            display: flex;
+            align-items: center;
+            padding: 0 16px;
+            gap: 16px;
+            font-size: 12px;
+            color: #888;
+        }
+
+        .status-bar .score {
+            color: #4caf50;
+            font-weight: 600;
+        }
+
+        .status-bar .hint {
+            margin-left: auto;
+            color: #666;
+        }
+
+        .loading-overlay {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 16px 24px;
+            border-radius: 8px;
+            font-size: 14px;
+            z-index: 10;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="toolbar">
+        <a href="/library-review/{{ library._id }}">Back</a>
+        <span class="description">{{ item.description }}</span>
+        <button class="secondary" onclick="clearPoints()">Clear</button>
+        <button class="secondary" onclick="undoPoint()">Undo</button>
+        <button class="primary" id="accept-btn" onclick="acceptMask()" disabled>Accept Mask</button>
+    </div>
+
+    <div class="canvas-container">
+        <canvas id="canvas"></canvas>
+        <div class="loading-overlay" id="loading">Processing...</div>
+    </div>
+
+    <div class="status-bar">
+        <span>Points: <strong id="point-count">0</strong></span>
+        <span>Score: <span class="score" id="score">-</span></span>
+        <span class="hint">Left-click: select object | Right-click: exclude background | Scroll: zoom</span>
+    </div>
+
+    <script>
+        const itemId = '{{ item._id }}';
+        const imageUrl = '{{ image_url }}';
+        const libraryId = '{{ library._id }}';
+
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const loadingEl = document.getElementById('loading');
+        const acceptBtn = document.getElementById('accept-btn');
+
+        let image = null;
+        let maskImage = null;
+        let points = [];
+        let predicting = false;
+
+        // Load the source image
+        image = new Image();
+        image.crossOrigin = 'anonymous';
+        image.onload = () => {
+            canvas.width = image.naturalWidth;
+            canvas.height = image.naturalHeight;
+            redraw();
+        };
+        image.src = imageUrl;
+
+        // Prevent context menu on right-click
+        canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+        // Click handler
+        canvas.addEventListener('mousedown', (e) => {
+            if (predicting) return;
+
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+
+            const x = Math.round((e.clientX - rect.left) * scaleX);
+            const y = Math.round((e.clientY - rect.top) * scaleY);
+
+            // Left click = foreground (1), right click = background (0)
+            const label = e.button === 0 ? 1 : 0;
+
+            points.push({ x, y, label });
+            redraw();
+            runPredict();
+        });
+
+        function clearPoints() {
+            points = [];
+            maskImage = null;
+            acceptBtn.disabled = true;
+            document.getElementById('point-count').textContent = '0';
+            document.getElementById('score').textContent = '-';
+            redraw();
+        }
+
+        function undoPoint() {
+            if (points.length === 0) return;
+            points.pop();
+            document.getElementById('point-count').textContent = points.length;
+
+            if (points.length === 0) {
+                maskImage = null;
+                acceptBtn.disabled = true;
+                document.getElementById('score').textContent = '-';
+                redraw();
+            } else {
+                runPredict();
+            }
+        }
+
+        function redraw() {
+            if (!image) return;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Draw original image
+            ctx.drawImage(image, 0, 0);
+
+            // Draw mask overlay
+            if (maskImage) {
+                ctx.globalAlpha = 0.35;
+                ctx.drawImage(maskImage, 0, 0);
+                ctx.globalAlpha = 1.0;
+            }
+
+            // Draw points
+            for (const p of points) {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, Math.max(6, canvas.width * 0.005), 0, Math.PI * 2);
+                ctx.fillStyle = p.label === 1 ? '#00ff00' : '#ff0000';
+                ctx.fill();
+                ctx.strokeStyle = 'white';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+        }
+
+        async function runPredict() {
+            if (points.length === 0) return;
+
+            predicting = true;
+            loadingEl.style.display = 'block';
+            document.getElementById('point-count').textContent = points.length;
+
+            try {
+                const res = await fetch('/api/sam/predict', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ item_id: itemId, points })
+                });
+
+                const data = await res.json();
+
+                if (!data.success) {
+                    alert('SAM error: ' + data.error);
+                    return;
+                }
+
+                document.getElementById('score').textContent = data.score.toFixed(3);
+                acceptBtn.disabled = false;
+
+                // Create colored mask overlay from grayscale mask
+                const maskImg = new Image();
+                maskImg.onload = () => {
+                    // Create a colored version of the mask
+                    const tempCanvas = document.createElement('canvas');
+                    tempCanvas.width = data.width;
+                    tempCanvas.height = data.height;
+                    const tempCtx = tempCanvas.getContext('2d');
+
+                    // Draw the grayscale mask
+                    tempCtx.drawImage(maskImg, 0, 0);
+                    const imgData = tempCtx.getImageData(0, 0, data.width, data.height);
+                    const pixels = imgData.data;
+
+                    // Convert grayscale to colored overlay (blue for mask)
+                    for (let i = 0; i < pixels.length; i += 4) {
+                        const v = pixels[i]; // grayscale value
+                        if (v > 128) {
+                            pixels[i] = 50;     // R
+                            pixels[i + 1] = 120; // G
+                            pixels[i + 2] = 255; // B
+                            pixels[i + 3] = 255; // A
+                        } else {
+                            pixels[i + 3] = 0;   // transparent
+                        }
+                    }
+                    tempCtx.putImageData(imgData, 0, 0);
+
+                    // Store colored mask as image
+                    const coloredMask = new Image();
+                    coloredMask.onload = () => {
+                        maskImage = coloredMask;
+                        redraw();
+                    };
+                    coloredMask.src = tempCanvas.toDataURL();
+                };
+                maskImg.src = 'data:image/png;base64,' + data.mask_base64;
+
+            } catch (e) {
+                console.error('Predict error:', e);
+                alert('Failed to run SAM prediction: ' + e.message);
+            } finally {
+                predicting = false;
+                loadingEl.style.display = 'none';
+            }
+        }
+
+        async function acceptMask() {
+            if (points.length === 0) return;
+
+            acceptBtn.disabled = true;
+            loadingEl.textContent = 'Compositing and saving...';
+            loadingEl.style.display = 'block';
+
+            try {
+                const res = await fetch('/api/sam/accept', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ item_id: itemId, points })
+                });
+
+                const data = await res.json();
+
+                if (!data.success) {
+                    alert('Error: ' + data.error);
+                    acceptBtn.disabled = false;
+                    return;
+                }
+
+                // Redirect back to library review
+                window.location.href = `/library-review/${libraryId}`;
+
+            } catch (e) {
+                console.error('Accept error:', e);
+                alert('Failed to accept mask: ' + e.message);
+                acceptBtn.disabled = false;
+            } finally {
+                loadingEl.style.display = 'none';
+            }
+        }
+    </script>
+</body>
+</html>

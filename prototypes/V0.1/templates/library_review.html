@@ -20,14 +20,19 @@
             color: #ccc;
         }
 
+        body {
+            display: flex;
+            flex-direction: column;
+        }
+
         .toolbar {
-            height: 48px;
             background: #2d2d2d;
             border-bottom: 1px solid #404040;
             display: flex;
+            flex-wrap: wrap;
             align-items: center;
-            padding: 0 16px;
-            gap: 12px;
+            padding: 8px 16px;
+            gap: 8px 12px;
             position: sticky;
             top: 0;
             z-index: 100;
@@ -41,6 +46,11 @@
 
         .toolbar-spacer {
             flex: 1;
+        }
+
+        .toolbar-buttons {
+            display: flex;
+            gap: 6px;
         }
 
         .toolbar button {
@@ -75,7 +85,8 @@
             font-size: 12px;
             color: #888;
             display: flex;
-            gap: 16px;
+            gap: 8px 16px;
+            flex-wrap: wrap;
         }
 
         .stats .stat {
@@ -99,6 +110,9 @@
             background: #252525;
             padding: 4px;
             border-radius: 6px;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            flex-shrink: 0;
         }
 
         .filter-tabs button {
@@ -109,6 +123,8 @@
             color: #888;
             font-size: 12px;
             cursor: pointer;
+            white-space: nowrap;
+            flex-shrink: 0;
         }
 
         .filter-tabs button:hover {
@@ -124,7 +140,8 @@
         .content {
             padding: 16px;
             overflow-y: auto;
-            height: calc(100vh - 48px);
+            flex: 1;
+            min-height: 0;
         }
 
         .group {
@@ -487,6 +504,9 @@
             padding: 20px;
             width: 90%;
             max-width: 500px;
+            max-height: 90vh;
+            overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
         }
 
         .modal-content h3 {
@@ -529,16 +549,174 @@
             background: #3c3c3c;
             color: #ccc;
         }
+
+        /* Responsive: tablets and smaller */
+        @media (max-width: 768px) {
+            .toolbar {
+                padding: 8px 12px;
+                gap: 6px 8px;
+            }
+
+            .toolbar h1 {
+                font-size: 13px;
+                flex: 1;
+                min-width: 0;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+            }
+
+            .toolbar-spacer {
+                display: none;
+            }
+
+            .toolbar button {
+                padding: 6px 10px;
+                font-size: 12px;
+            }
+
+            .stats {
+                gap: 6px 12px;
+                font-size: 11px;
+                width: 100%;
+            }
+
+            .filter-tabs {
+                width: 100%;
+            }
+
+            .toolbar-buttons button {
+                padding: 6px 8px;
+                font-size: 11px;
+            }
+
+            .content {
+                padding: 8px;
+            }
+
+            .variants-grid {
+                grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+                gap: 8px;
+                padding: 8px;
+            }
+
+            .group-header {
+                padding: 8px 12px;
+                flex-wrap: wrap;
+                gap: 6px;
+            }
+
+            .group-header .description {
+                font-size: 13px;
+                min-width: 0;
+            }
+
+            .group-actions {
+                padding: 8px 12px;
+                flex-wrap: wrap;
+                gap: 6px;
+            }
+
+            .group-actions button {
+                padding: 6px 10px;
+                font-size: 11px;
+            }
+
+            .viewer-modal .viewer-container {
+                width: 95%;
+                height: 90%;
+            }
+
+            .modal-content {
+                width: 95%;
+                padding: 16px;
+            }
+
+            .variant-actions button, .variant-actions a {
+                padding: 8px 6px;
+                font-size: 16px;
+            }
+        }
+
+        /* Responsive: phones */
+        @media (max-width: 480px) {
+            .toolbar h1 {
+                font-size: 12px;
+            }
+
+            .filter-tabs button {
+                padding: 6px 8px;
+                font-size: 11px;
+            }
+
+            .variants-grid {
+                grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+                gap: 6px;
+                padding: 6px;
+            }
+
+            .variant-info {
+                padding: 6px;
+                font-size: 10px;
+            }
+
+            .variant-actions {
+                padding: 6px;
+                gap: 4px;
+            }
+
+            .variant-actions button, .variant-actions a {
+                padding: 10px 6px;
+                font-size: 18px;
+            }
+
+            .group-header .variant-count {
+                font-size: 11px;
+            }
+
+            .group-header .edit-btn {
+                font-size: 10px;
+                padding: 4px 6px;
+            }
+
+            .viewer-modal .viewer-container {
+                width: 100%;
+                height: 100%;
+                border-radius: 0;
+            }
+
+            .lightbox img {
+                max-width: 100%;
+                max-height: 100%;
+            }
+        }
     </style>
 </head>
 <body>
     <div class="toolbar">
         <h1>Library Review: {{ library.name }}</h1>
         <div class="toolbar-spacer"></div>
+        <div class="toolbar-buttons">
+            <button class="secondary" onclick="showUploadModal()">Import</button>
+            <button class="secondary" onclick="refreshData()">Refresh</button>
+            <button class="secondary" id="auto-refresh-btn" onclick="toggleAutoRefresh()">Auto: OFF</button>
+        </div>
+
+        <div class="filter-tabs">
+            <button class="active" data-status="needs_review">Pending</button>
+            <button data-status="needs_masking">Masking</button>
+            <button data-status="processing">Processing</button>
+            <button data-status="rejected">Rejected</button>
+            <button data-status="ready">Ready</button>
+            <button data-status="failed">Failed</button>
+        </div>
 
         <div class="stats">
             <div class="stat pending">
                 <span class="count" id="stat-pending">-</span> pending
+            </div>
+            <div class="stat" style="color:#2196f3">
+                <span class="count" id="stat-masking" style="color:#2196f3">-</span> masking
             </div>
             <div class="stat approved">
                 <span class="count" id="stat-processing">-</span> processing
@@ -553,17 +731,6 @@
                 <span class="count" id="stat-failed" style="color:#f44336">-</span> failed
             </div>
         </div>
-
-        <div class="filter-tabs">
-            <button class="active" data-status="needs_review">Pending</button>
-            <button data-status="processing">Processing</button>
-            <button data-status="rejected">Rejected</button>
-            <button data-status="ready">Ready</button>
-            <button data-status="failed">Failed</button>
-        </div>
-
-        <button class="secondary" onclick="refreshData()">Refresh</button>
-        <button class="secondary" id="auto-refresh-btn" onclick="toggleAutoRefresh()">Auto-refresh: OFF</button>
     </div>
 
     <div class="content" id="content">
@@ -590,6 +757,38 @@
         </div>
     </div>
 
+    <!-- Upload images modal -->
+    <div class="modal" id="upload-modal">
+        <div class="modal-content" style="max-width: 560px;">
+            <h3>Import Images</h3>
+            <p style="color: #888; font-size: 13px; margin-bottom: 12px;">Upload photos or capture from camera to mask and convert to 3D objects.</p>
+
+            <!-- File upload -->
+            <input type="file" id="upload-files" accept="image/*" multiple
+                   style="margin-bottom: 8px; color: #ccc; font-size: 13px;">
+
+            <!-- Camera capture -->
+            <div id="camera-section" style="margin-bottom: 8px;">
+                <button class="cancel-btn" id="camera-toggle-btn" onclick="toggleCamera()" style="margin-bottom: 8px; font-size: 12px;">Use Camera</button>
+                <div id="camera-preview" style="display:none; position: relative; margin-bottom: 8px;">
+                    <video id="camera-video" autoplay playsinline style="width: 100%; aspect-ratio: 4/3; object-fit: cover; border-radius: 4px; background: #000;"></video>
+                    <div style="display: flex; gap: 8px; margin-top: 8px;">
+                        <button class="save-btn" onclick="capturePhoto()" style="flex:1;">Capture Photo</button>
+                        <button class="cancel-btn" onclick="toggleCamera()">Stop Camera</button>
+                    </div>
+                </div>
+                <div id="captured-images" style="display: flex; gap: 8px; flex-wrap: wrap;"></div>
+            </div>
+
+            <textarea id="upload-description" placeholder="Description (applied to all images, or leave blank to use filenames)"
+                      style="margin-bottom: 12px;"></textarea>
+            <div class="modal-actions">
+                <button class="cancel-btn" onclick="closeUploadModal()">Cancel</button>
+                <button class="save-btn" onclick="uploadImages()">Upload</button>
+            </div>
+        </div>
+    </div>
+
     <!-- 3D Viewer modal -->
     <div class="viewer-modal" id="viewer-modal" onclick="closeViewer(event)">
         <div class="viewer-container" onclick="event.stopPropagation()">
@@ -600,8 +799,37 @@
                 auto-rotate
                 shadow-intensity="1"
                 environment-image="neutral"
-                exposure="1.0"
+                exposure="2.0"
             ></model-viewer>
+            <div style="position: absolute; top: 10px; left: 10px; z-index: 10; display: flex; gap: 6px;">
+                <select id="viewer-lighting-preset" onchange="applyViewerLighting(this.value)" style="
+                    background: rgba(30,30,30,0.85);
+                    color: #eee;
+                    border: 1px solid #555;
+                    border-radius: 4px;
+                    padding: 5px 8px;
+                    font-size: 13px;
+                    cursor: pointer;
+                ">
+                    <option value="studio">Studio</option>
+                    <option value="bright">Bright</option>
+                    <option value="outdoor">Outdoor</option>
+                    <option value="soft">Soft</option>
+                    <option value="dramatic">Dramatic</option>
+                    <option value="flat">Flat</option>
+                </select>
+                <select id="viewer-background" onchange="applyViewerBackground(this.value)" style="
+                    background: rgba(30,30,30,0.85);
+                    color: #eee;
+                    border: 1px solid #555;
+                    border-radius: 4px;
+                    padding: 5px 8px;
+                    font-size: 13px;
+                    cursor: pointer;
+                ">
+                    <option value="">No Background</option>
+                </select>
+            </div>
         </div>
     </div>
 
@@ -643,14 +871,14 @@
             autoRefreshEnabled = enable;
 
             if (autoRefreshEnabled) {
-                btn.textContent = 'Auto-refresh: ON';
+                btn.textContent = 'Auto: ON';
                 btn.classList.add('active');
                 autoRefreshInterval = setInterval(() => {
                     loadStats();
                     loadReviewItems();
                 }, 5000); // Refresh every 5 seconds
             } else {
-                btn.textContent = 'Auto-refresh: OFF';
+                btn.textContent = 'Auto: OFF';
                 btn.classList.remove('active');
                 if (autoRefreshInterval) {
                     clearInterval(autoRefreshInterval);
@@ -665,6 +893,7 @@
                 const data = await res.json();
                 if (data.success) {
                     document.getElementById('stat-pending').textContent = data.needs_review || 0;
+                    document.getElementById('stat-masking').textContent = data.needs_masking || 0;
                     document.getElementById('stat-processing').textContent = data.processing || 0;
                     document.getElementById('stat-rejected').textContent = data.rejected || 0;
                     document.getElementById('stat-ready').textContent = data.ready || 0;
@@ -693,6 +922,7 @@
                 if (groups.length === 0) {
                     const statusLabels = {
                         'needs_review': 'pending review',
+                        'needs_masking': 'needs masking',
                         'processing': 'processing',
                         'rejected': 'rejected',
                         'ready': 'ready',
@@ -744,9 +974,10 @@
         function renderVariant(variant) {
             const status = variant.status;
             const isReviewable = status === 'needs_review';
+            const isMaskable = status === 'needs_masking';
             const isRetryable = status === 'rejected' || status === 'failed';
-            const isProcessing = ['approved', 'needs_mask', 'needs_3d', 'needs_embedding'].includes(status);
-            const isStuck = ['needs_3d', 'needs_embedding'].includes(status);  // Only show Force Retry for items past mask stage
+            const isProcessing = ['approved', 'needs_3d', 'needs_embedding'].includes(status);
+            const isStuck = ['needs_3d', 'needs_embedding'].includes(status);
             const isReady = status === 'ready';
             const rawPath = variant.image_path || '';
             const imgSrc = rawPath && !rawPath.startsWith('/') ? '/' + rawPath : rawPath;
@@ -770,6 +1001,9 @@
                     </div>
                     ` : ''}
                     <div class="variant-actions">
+                        ${isMaskable ? `
+                        <a href="/library-mask/${variant._id}" class="approve-btn" style="text-decoration:none;text-align:center;">Mask Object</a>
+                        ` : ''}
                         ${isReviewable ? `
                         <button class="approve-btn" onclick="approveItem('${variant._id}')">Approve</button>
                         <button class="reject-btn" onclick="rejectItem('${variant._id}')">Reject</button>
@@ -1007,9 +1241,65 @@
             document.getElementById('lightbox').classList.remove('active');
         }
 
+        // --- Background / Environment panoramas ---
+        function applyViewerBackground(value) {
+            const viewer = document.getElementById('model-viewer');
+            if (value) {
+                viewer.setAttribute('skybox-image', value);
+                viewer.setAttribute('environment-image', value);
+            } else {
+                viewer.removeAttribute('skybox-image');
+                // Restore lighting preset's env setting
+                const preset = viewerLightingPresets[document.getElementById('viewer-lighting-preset').value];
+                viewer.setAttribute('environment-image', preset ? preset.env : 'neutral');
+            }
+        }
+
+        // Populate background dropdown from server
+        (async function loadEnvironments() {
+            try {
+                const resp = await fetch('/api/environments');
+                if (!resp.ok) return;
+                const envs = await resp.json();
+                const select = document.getElementById('viewer-background');
+                for (const env of envs) {
+                    const opt = document.createElement('option');
+                    opt.value = env.url;
+                    opt.textContent = env.name;
+                    select.appendChild(opt);
+                }
+            } catch(e) {
+                console.warn('Could not load environments:', e);
+            }
+        })();
+
+        const viewerLightingPresets = {
+            studio:   { exposure: 2.0, shadowIntensity: 1.0, env: 'neutral' },
+            bright:   { exposure: 3.0, shadowIntensity: 0.5, env: 'neutral' },
+            outdoor:  { exposure: 2.2, shadowIntensity: 1.5, env: 'legacy' },
+            soft:     { exposure: 2.5, shadowIntensity: 0.3, env: 'neutral' },
+            dramatic: { exposure: 1.5, shadowIntensity: 2.0, env: 'neutral' },
+            flat:     { exposure: 3.0, shadowIntensity: 0.0, env: 'neutral' },
+        };
+
+        function applyViewerLighting(name) {
+            const preset = viewerLightingPresets[name];
+            if (!preset) return;
+            const viewer = document.getElementById('model-viewer');
+            viewer.exposure = preset.exposure;
+            viewer.shadowIntensity = preset.shadowIntensity;
+            // Only set env if no panorama background is active
+            const bgSelect = document.getElementById('viewer-background');
+            if (!bgSelect.value) {
+                viewer.environmentImage = preset.env;
+            }
+        }
+
         function view3D(assetPath, assetType) {
             const viewer = document.getElementById('model-viewer');
+            const presetSelect = document.getElementById('viewer-lighting-preset');
             viewer.src = assetPath;
+            applyViewerLighting(presetSelect.value);
             document.getElementById('viewer-modal').classList.add('active');
         }
 
@@ -1032,12 +1322,167 @@
             return div.innerHTML;
         }
 
+        // Upload modal
+        function showUploadModal() {
+            document.getElementById('upload-modal').style.display = 'flex';
+        }
+
+        function closeUploadModal() {
+            stopCamera();
+            capturedFiles = [];
+            document.getElementById('captured-images').innerHTML = '';
+            document.getElementById('upload-modal').style.display = 'none';
+            document.getElementById('upload-files').value = '';
+            document.getElementById('upload-description').value = '';
+        }
+
+        // Camera capture
+        let cameraStream = null;
+        let capturedFiles = [];
+        let captureCount = 0;
+
+        async function toggleCamera() {
+            const preview = document.getElementById('camera-preview');
+            const video = document.getElementById('camera-video');
+            const btn = document.getElementById('camera-toggle-btn');
+
+            if (cameraStream) {
+                stopCamera();
+                return;
+            }
+
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                alert('Camera access requires HTTPS or localhost.\n\nTry accessing this page via https://localhost:5000 instead.');
+                return;
+            }
+
+            try {
+                cameraStream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: { ideal: 1920 }, height: { ideal: 1080 }, facingMode: { ideal: 'environment' } }
+                });
+                video.srcObject = cameraStream;
+                preview.style.display = 'block';
+                btn.style.display = 'none';
+                // Force iOS to recalculate scroll after video element resizes
+                video.addEventListener('loadedmetadata', () => {
+                    const modal = document.querySelector('#upload-modal .modal-content');
+                    if (modal) modal.scrollTop = modal.scrollHeight;
+                }, { once: true });
+            } catch (e) {
+                alert('Could not access camera: ' + e.message);
+            }
+        }
+
+        function stopCamera() {
+            const preview = document.getElementById('camera-preview');
+            const video = document.getElementById('camera-video');
+            const btn = document.getElementById('camera-toggle-btn');
+
+            if (cameraStream) {
+                cameraStream.getTracks().forEach(t => t.stop());
+                cameraStream = null;
+            }
+            video.srcObject = null;
+            preview.style.display = 'none';
+            btn.style.display = '';
+        }
+
+        function capturePhoto() {
+            const video = document.getElementById('camera-video');
+            if (!video.videoWidth) return;
+
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = video.videoWidth;
+            tempCanvas.height = video.videoHeight;
+            tempCanvas.getContext('2d').drawImage(video, 0, 0);
+
+            captureCount++;
+            const filename = `capture_${captureCount}.png`;
+
+            tempCanvas.toBlob(blob => {
+                const file = new File([blob], filename, { type: 'image/png' });
+                capturedFiles.push(file);
+
+                // Show thumbnail
+                const container = document.getElementById('captured-images');
+                const thumb = document.createElement('div');
+                thumb.style.cssText = 'position:relative; width:80px; height:80px;';
+                const img = document.createElement('img');
+                img.src = URL.createObjectURL(blob);
+                img.style.cssText = 'width:80px; height:80px; object-fit:cover; border-radius:4px; border:1px solid #555;';
+                thumb.appendChild(img);
+
+                const removeBtn = document.createElement('button');
+                removeBtn.textContent = 'x';
+                removeBtn.style.cssText = 'position:absolute; top:-4px; right:-4px; width:18px; height:18px; border-radius:50%; border:none; background:#c62828; color:white; font-size:10px; cursor:pointer; line-height:18px; padding:0;';
+                const idx = capturedFiles.length - 1;
+                removeBtn.onclick = () => {
+                    capturedFiles[idx] = null;
+                    thumb.remove();
+                };
+                thumb.appendChild(removeBtn);
+                container.appendChild(thumb);
+            }, 'image/png');
+        }
+
+        async function uploadImages() {
+            const fileInput = document.getElementById('upload-files').files;
+            const hasFiles = fileInput && fileInput.length > 0;
+            const hasCaptured = capturedFiles.some(f => f !== null);
+
+            if (!hasFiles && !hasCaptured) {
+                alert('Please select or capture images to upload');
+                return;
+            }
+
+            const description = document.getElementById('upload-description').value.trim();
+
+            const formData = new FormData();
+            // Add file-picker files
+            if (fileInput) {
+                for (const file of fileInput) {
+                    formData.append('images', file);
+                }
+            }
+            // Add camera captures
+            for (const file of capturedFiles) {
+                if (file) formData.append('images', file);
+            }
+            if (description) {
+                formData.append('description', description);
+            }
+
+            try {
+                const res = await fetch(`/api/libraries/${libraryId}/upload`, {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await res.json();
+
+                if (data.success) {
+                    closeUploadModal();
+                    // Switch to masking tab
+                    document.querySelectorAll('.filter-tabs button').forEach(b => b.classList.remove('active'));
+                    const maskBtn = document.querySelector('.filter-tabs button[data-status="needs_masking"]');
+                    if (maskBtn) maskBtn.classList.add('active');
+                    currentStatus = 'needs_masking';
+                    refreshData();
+                } else {
+                    alert('Upload failed: ' + data.error);
+                }
+            } catch (e) {
+                console.error('Upload error:', e);
+                alert('Upload failed: ' + e.message);
+            }
+        }
+
         // Keyboard shortcuts
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') {
                 closeLightbox();
                 closeEditModal();
                 closeViewer();
+                closeUploadModal();
             }
         });
     </script>

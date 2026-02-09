@@ -1,8 +1,10 @@
 # Dependencies
 node_modules/
 
-# Media files (too large for git)
+# Generated media (too large for git)
 media/*.ply
+media/generated/
+media/faiss_indices/
 
 # Python
 __pycache__/
@@ -10,6 +12,9 @@ __pycache__/
 
 # Environment
 .env
+
+# SSL certs
+certs/
 
 # IDE
 .vscode/

@@ -117,6 +117,53 @@ class DatabaseService:
             raise RuntimeError("Database not connected")
         return self.db.library_items
 
+    @property
+    def gpu_lock(self) -> Collection:
+        """GPU lock collection"""
+        if self.db is None:
+            raise RuntimeError("Database not connected")
+        return self.db.gpu_lock
+
+    # Migration
+
+    def migrate_to_trellis2(self) -> Dict[str, int]:
+        """
+        Migrate existing data from 3-stage (SAM3D) to 2-stage (Trellis2) pipeline.
+        Updates: needs_mask/needs_splat → needs_3d, removes mask_path field.
+        """
+        results = {}
+
+        # Scene jobs: needs_mask or needs_splat → needs_3d
+        r = self.jobs.update_many(
+            {"status": {"$in": ["needs_mask", "needs_splat"]}},
+            {"$set": {"status": "needs_3d"}, "$unset": {"mask_path": ""}}
+        )
+        results["jobs_migrated"] = r.modified_count
+
+        # Library items: needs_mask → needs_3d
+        r = self.library_items.update_many(
+            {"status": "needs_mask"},
+            {"$set": {"status": "needs_3d"}}
+        )
+        results["items_needs_mask_migrated"] = r.modified_count
+
+        # Library items: approved → needs_3d (they had images, skip to 3D)
+        r = self.library_items.update_many(
+            {"status": "approved"},
+            {"$set": {"status": "needs_3d"}}
+        )
+        results["items_approved_migrated"] = r.modified_count
+
+        # Clean up mask_path field from all library items
+        r = self.library_items.update_many(
+            {"mask_path": {"$exists": True}},
+            {"$unset": {"mask_path": ""}}
+        )
+        results["mask_path_removed"] = r.modified_count
+
+        logger.info(f"Migration to Trellis2 complete: {results}")
+        return results
+
     # Scene operations
 
     def save_scene(self, scene_data: Dict[str, Any]) -> str:
@@ -181,8 +228,7 @@ class DatabaseService:
 
         Stages:
           - "pending" = needs image generation (SD3.5)
-          - "needs_mask" = image done, needs mask generation (SAM)
-          - "needs_splat" = mask done, needs splat generation (SAM3D)
+          - "needs_3d" = image done, needs 3D generation (Trellis2)
           - "processing" = currently being worked on
           - "completed" = finished
           - "failed" = error occurred
@@ -219,15 +265,14 @@ class DatabaseService:
         """Get a job by ID"""
         return self.jobs.find_one({"_id": job_id})
 
-    def reset_failed_jobs(self, reset_to_stage: str = "needs_splat") -> int:
+    def reset_failed_jobs(self, reset_to_stage: str = "needs_3d") -> int:
         """
         Reset all failed jobs to retry them.
 
         Args:
             reset_to_stage: Stage to reset to. Options:
               - "pending" = restart from image generation
-              - "needs_mask" = restart from mask generation (keep image)
-              - "needs_splat" = restart from splat generation (keep image + mask)
+              - "needs_3d" = restart from 3D generation (keep image)
 
         Returns:
             Number of jobs reset
@@ -237,26 +282,14 @@ class DatabaseService:
 
         reset_count = 0
         for job in failed_jobs:
-            # Determine what stage to reset to based on what we have
             if reset_to_stage == "pending":
-                # Full restart
                 new_status = "pending"
-            elif reset_to_stage == "needs_mask":
-                # Restart from mask generation if we have an image
+            else:  # needs_3d
                 if job.get("image_path"):
-                    new_status = "needs_mask"
-                else:
-                    new_status = "pending"
-            else:  # needs_splat
-                # Restart from splat generation if we have image + mask
-                if job.get("image_path") and job.get("mask_path"):
-                    new_status = "needs_splat"
-                elif job.get("image_path"):
-                    new_status = "needs_mask"
+                    new_status = "needs_3d"
                 else:
                     new_status = "pending"
 
-            # Reset the job
             self.jobs.update_one(
                 {"_id": job["_id"]},
                 {"$set": {
@@ -274,39 +307,29 @@ class DatabaseService:
         """Get all failed jobs"""
         return list(self.jobs.find({"status": "failed"}))
 
-    def reset_all_jobs(self, reset_to_stage: str = "needs_splat") -> int:
+    def reset_all_jobs(self, reset_to_stage: str = "needs_3d") -> int:
         """
         Reset ALL jobs (including completed) to retry them.
 
         Args:
             reset_to_stage: Stage to reset to. Options:
               - "pending" = restart from image generation
-              - "needs_mask" = restart from mask generation (keep image)
-              - "needs_splat" = restart from splat generation (keep image + mask)
+              - "needs_3d" = restart from 3D generation (keep image)
 
         Returns:
             Number of jobs reset
         """
-        # Find all jobs that aren't already at the target stage
         all_jobs = list(self.jobs.find({
-            "status": {"$nin": ["pending", "needs_mask", "needs_splat"]}
+            "status": {"$nin": ["pending", "needs_3d"]}
         }))
 
         reset_count = 0
         for job in all_jobs:
-            # Determine what stage to reset to based on what we have
             if reset_to_stage == "pending":
                 new_status = "pending"
-            elif reset_to_stage == "needs_mask":
+            else:  # needs_3d
                 if job.get("image_path"):
-                    new_status = "needs_mask"
-                else:
-                    new_status = "pending"
-            else:  # needs_splat
-                if job.get("image_path") and job.get("mask_path"):
-                    new_status = "needs_splat"
-                elif job.get("image_path"):
-                    new_status = "needs_mask"
+                    new_status = "needs_3d"
                 else:
                     new_status = "pending"
 
@@ -406,7 +429,6 @@ class DatabaseService:
                     "variant_index": variant_idx,
                     "seed": seed,
                     "image_path": None,
-                    "mask_path": None,
                     "asset_path": None,
                     "asset_type": None,
                     "text_embedding": None,
@@ -421,6 +443,48 @@ class DatabaseService:
                    f"x {variants_per_item} variants = {len(descriptions) * variants_per_item} total")
 
         return library["_id"]
+
+    def add_uploaded_item(self, library_id: str, description: str,
+                          original_image_path: str) -> str:
+        """
+        Create a library item from an uploaded image (needs interactive masking).
+
+        Returns:
+            Item ID
+        """
+        import uuid
+        import hashlib
+
+        variant_group_id = hashlib.md5(description.encode()).hexdigest()[:12]
+
+        item = {
+            "_id": uuid.uuid4().hex,
+            "library_id": library_id,
+            "description": description,
+            "variant_group_id": variant_group_id,
+            "variant_index": 0,
+            "seed": 0,
+            "source": "upload",
+            "original_image_path": original_image_path,
+            "image_path": original_image_path,  # Show original in review UI
+            "asset_path": None,
+            "asset_type": None,
+            "text_embedding": None,
+            "image_embedding": None,
+            "status": "needs_masking",
+            "error": None,
+            "created_at": datetime.utcnow()
+        }
+        self.library_items.insert_one(item)
+
+        # Update library counts
+        self.libraries.update_one(
+            {"_id": library_id},
+            {"$inc": {"total_variants": 1, "item_count": 1}}
+        )
+
+        logger.info(f"Added uploaded item to library {library_id}: {description[:50]}")
+        return item["_id"]
 
     def get_library(self, library_id: str) -> Optional[Dict[str, Any]]:
         """Get a library by ID"""
@@ -481,7 +545,7 @@ class DatabaseService:
         """
         # Handle "processing" as a special multi-status query
         if status == "processing":
-            query = {"status": {"$in": ["approved", "needs_mask", "needs_3d", "needs_embedding"]}}
+            query = {"status": {"$in": ["approved", "needs_3d", "needs_embedding"]}}
         else:
             query = {"status": status}
 
@@ -550,7 +614,6 @@ class DatabaseService:
         update = {
             "status": "pending",
             "image_path": None,
-            "mask_path": None,
             "asset_path": None,
             "asset_type": None,
             "error": None,
@@ -572,22 +635,20 @@ class DatabaseService:
     def retry_stuck_item(self, item_id: str) -> bool:
         """
         Retry a stuck processing item or ready item.
-        Keeps the image but resets to approved status to retry from mask generation.
-        Works for: approved, needs_mask, needs_3d, needs_embedding, ready
+        Keeps the image but resets to needs_3d to retry 3D generation.
+        Works for: approved, needs_3d, needs_embedding, ready
         """
         item = self.library_items.find_one({"_id": item_id})
         if not item:
             return False
 
-        # Allow retry for processing states AND ready (for redo 3D)
-        allowed_states = ["approved", "needs_mask", "needs_3d", "needs_embedding", "ready"]
+        allowed_states = ["approved", "needs_3d", "needs_embedding", "ready"]
         if item.get("status") not in allowed_states:
             return False
 
         # Keep the image, reset everything else
         update = {
-            "status": "approved",  # Reset to approved, worker will pick up
-            "mask_path": None,
+            "status": "needs_3d",
             "asset_path": None,
             "asset_type": None,
             "error": None
@@ -690,7 +751,6 @@ class DatabaseService:
             "variant_index": existing,
             "seed": seed,
             "image_path": None,
-            "mask_path": None,
             "asset_path": None,
             "asset_type": None,
             "text_embedding": None,
@@ -787,14 +847,14 @@ class DatabaseService:
         stats = {r["_id"]: r["count"] for r in results}
 
         # Ensure all statuses have a value
-        all_statuses = ["pending", "needs_review", "approved", "rejected",
-                       "needs_mask", "needs_3d", "needs_embedding", "ready", "failed"]
+        all_statuses = ["pending", "needs_masking", "needs_review", "approved", "rejected",
+                       "needs_3d", "needs_embedding", "ready", "failed"]
         for status in all_statuses:
             if status not in stats:
                 stats[status] = 0
 
         # Add combined "processing" count (approved through needs_embedding)
-        stats["processing"] = (stats.get("approved", 0) + stats.get("needs_mask", 0) +
+        stats["processing"] = (stats.get("approved", 0) +
                                stats.get("needs_3d", 0) + stats.get("needs_embedding", 0))
 
         return stats

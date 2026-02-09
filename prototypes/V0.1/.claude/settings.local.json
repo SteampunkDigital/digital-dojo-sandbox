@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Read(//c/Users/david/Documents/GitHub/sd3.5/**)"
+      "Read(//c/Users/david/Documents/GitHub/sd3.5/**)",
+      "Bash(find:*)",
+      "Bash(dir:*)",
+      "Bash(findstr:*)"
     ]
   }
 }

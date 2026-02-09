@@ -554,17 +554,18 @@ def api_download_asset(asset_id):
 @app.route('/api/generate/sync', methods=['POST'])
 def api_generate_sync():
     """
-    Run generation synchronously (for testing).
+    Run image generation synchronously (for testing).
     This bypasses the job queue and runs immediately.
 
     WARNING: This blocks the request until generation completes.
     Only use for testing with small prompts.
 
-    Request body: { "prompt": "...", "stage": "image|splat|full" }
+    3D mesh generation is handled by the Trellis2 worker asynchronously.
+
+    Request body: { "prompt": "..." }
     """
     data = request.get_json()
     prompt = data.get('prompt', '')
-    stage = data.get('stage', 'image')  # image, splat, or full
 
     if not prompt:
         return jsonify({"error": "No prompt provided", "success": False}), 400
@@ -574,35 +575,11 @@ def api_generate_sync():
         return jsonify({"error": "Orchestrator not available", "success": False}), 503
 
     try:
-        if stage == 'image':
-            # Just generate image
-            output_path = orchestrator.run_image_only(prompt)
-            return jsonify({
-                "image_path": output_path,
-                "success": True
-            })
-        elif stage == 'splat':
-            # Need an image path
-            image_path = data.get('image_path')
-            if not image_path:
-                return jsonify({"error": "image_path required for splat stage", "success": False}), 400
-            output_path = orchestrator.run_splat_only(image_path)
-            return jsonify({
-                "splat_path": output_path,
-                "success": True
-            })
-        else:
-            # Full pipeline
-            from services.orchestrator import GenerationJob
-            job = GenerationJob(id="sync", prompt=prompt)
-            result = orchestrator.run_pipeline(job)
-            return jsonify({
-                "image_path": result.image_path,
-                "splat_path": result.splat_path,
-                "status": result.status,
-                "error": result.error,
-                "success": result.status == "completed"
-            })
+        output_path = orchestrator.run_image_only(prompt)
+        return jsonify({
+            "image_path": output_path,
+            "success": True
+        })
     except Exception as e:
         logger.error(f"Sync generation error: {e}")
         return jsonify({"error": str(e), "success": False}), 500
@@ -1080,6 +1057,13 @@ def api_get_review_items(library_id):
                     variant['created_at'] = variant['created_at'].isoformat()
                 if 'reviewed_at' in variant and variant['reviewed_at']:
                     variant['reviewed_at'] = variant['reviewed_at'].isoformat()
+                # Convert filesystem paths to web URLs
+                if variant.get('image_path'):
+                    variant['image_path'] = _path_to_url(variant['image_path'])
+                if variant.get('asset_path'):
+                    variant['asset_path'] = _path_to_url(variant['asset_path'])
+                if variant.get('original_image_path'):
+                    variant['original_image_path'] = _path_to_url(variant['original_image_path'])
                 # Remove embeddings from response
                 variant.pop('text_embedding', None)
                 variant.pop('image_embedding', None)
@@ -1183,7 +1167,7 @@ def api_reject_item(item_id):
 def api_reset_item(item_id):
     """
     Reset a rejected or failed item for regeneration.
-    Clears image/mask/asset and assigns a new seed.
+    Clears image/asset and assigns a new seed.
     """
     db = get_db()
     if not db:
@@ -1207,8 +1191,8 @@ def api_reset_item(item_id):
 @app.route('/api/libraries/items/<item_id>/retry', methods=['POST'])
 def api_retry_item(item_id):
     """
-    Retry a stuck processing item (keeps image, resets to approved).
-    Use this for items stuck at needs_mask, needs_3d, or needs_embedding.
+    Retry a stuck processing item (keeps image, resets to needs_3d).
+    Use this for items stuck at needs_3d or needs_embedding.
     """
     db = get_db()
     if not db:
@@ -1410,6 +1394,260 @@ def api_update_group_description(group_id):
         return jsonify({"error": str(e), "success": False}), 500
 
 
+
+# ============== Image Upload + SAM Masking ==============
+
+_sam_service = None
+
+def get_sam():
+    """Lazy-load SAM service."""
+    global _sam_service
+    if _sam_service is None:
+        from services.sam_service import get_sam_service
+        _sam_service = get_sam_service()
+    return _sam_service
+
+
+@app.route('/api/libraries/<library_id>/upload', methods=['POST'])
+def api_upload_images(library_id):
+    """
+    Upload images to a library for interactive SAM masking.
+
+    Accepts multipart/form-data with 'images' files and optional 'descriptions' JSON.
+    Creates library_items with status 'needs_masking'.
+    """
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    library = db.get_library(library_id)
+    if not library:
+        return jsonify({"error": "Library not found", "success": False}), 404
+
+    files = request.files.getlist('images')
+    if not files:
+        return jsonify({"error": "No images uploaded", "success": False}), 400
+
+    # Parse descriptions (JSON array or single string)
+    import json as json_module
+    descriptions_raw = request.form.get('descriptions', '[]')
+    try:
+        descriptions = json_module.loads(descriptions_raw)
+        if isinstance(descriptions, str):
+            descriptions = [descriptions]
+    except (json_module.JSONDecodeError, TypeError):
+        descriptions = []
+
+    single_description = request.form.get('description', '')
+
+    import uuid
+    from PIL import Image as PILImage
+
+    output_dir = os.path.join(os.path.dirname(__file__), 'media', 'generated')
+    item_ids = []
+
+    for i, file in enumerate(files):
+        if not file.filename:
+            continue
+
+        # Determine description
+        if i < len(descriptions) and descriptions[i]:
+            desc = descriptions[i]
+        elif single_description:
+            desc = single_description
+        else:
+            # Use filename without extension
+            desc = os.path.splitext(file.filename)[0].replace('_', ' ').replace('-', ' ')
+
+        # Create upload directory
+        upload_id = uuid.uuid4().hex[:8]
+        upload_dir = os.path.join(output_dir, f"upload_{upload_id}")
+        os.makedirs(upload_dir, exist_ok=True)
+
+        # Save and resize image
+        try:
+            img = PILImage.open(file.stream).convert("RGB")
+
+            # Resize if too large (max 2048px on long edge)
+            max_edge = 2048
+            if max(img.size) > max_edge:
+                ratio = max_edge / max(img.size)
+                new_size = (int(img.width * ratio), int(img.height * ratio))
+                img = img.resize(new_size, PILImage.LANCZOS)
+
+            original_path = os.path.join(upload_dir, "original.png")
+            img.save(original_path)
+        except Exception as e:
+            logger.error(f"Failed to save uploaded image: {e}")
+            continue
+
+        # Create library item
+        item_id = db.add_uploaded_item(library_id, desc, original_path)
+        item_ids.append(item_id)
+
+    return jsonify({
+        "items_created": len(item_ids),
+        "item_ids": item_ids,
+        "success": True
+    })
+
+
+@app.route('/api/sam/predict', methods=['POST'])
+def api_sam_predict():
+    """
+    Run SAM prediction from point prompts.
+
+    Request body:
+    {
+        "item_id": "abc123",
+        "points": [{"x": 100, "y": 200, "label": 1}, ...]
+    }
+
+    Returns mask as base64 PNG + confidence score.
+    """
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    data = request.get_json()
+    item_id = data.get('item_id')
+    points = data.get('points', [])
+
+    if not item_id or not points:
+        return jsonify({"error": "item_id and points required", "success": False}), 400
+
+    # Look up item
+    item = db.library_items.find_one({"_id": item_id})
+    if not item:
+        return jsonify({"error": "Item not found", "success": False}), 404
+
+    image_path = item.get('original_image_path') or item.get('image_path')
+    if not image_path or not os.path.exists(image_path):
+        return jsonify({"error": "Image not found", "success": False}), 404
+
+    # Acquire GPU lock briefly
+    import sys
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    from gpu_lock import GPULock
+
+    gpu_lock = GPULock("flask_sam")
+    if not gpu_lock.acquire(timeout=30):
+        return jsonify({"error": "GPU is busy (another worker is running). Please retry in a moment.", "success": False}), 503
+
+    try:
+        sam = get_sam()
+        sam.check_auto_unload()
+        mask, score = sam.predict(item_id, image_path, points)
+
+        # Encode mask as base64 PNG
+        import base64
+        from io import BytesIO
+        from PIL import Image as PILImage
+
+        mask_uint8 = (mask * 255).astype('uint8')
+        mask_img = PILImage.fromarray(mask_uint8, mode='L')
+        buffer = BytesIO()
+        mask_img.save(buffer, format='PNG')
+        mask_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+
+        return jsonify({
+            "mask_base64": mask_b64,
+            "score": score,
+            "width": mask.shape[1],
+            "height": mask.shape[0],
+            "success": True
+        })
+
+    except Exception as e:
+        logger.error(f"SAM predict error: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+    finally:
+        gpu_lock.release()
+
+
+@app.route('/api/sam/accept', methods=['POST'])
+def api_sam_accept():
+    """
+    Accept a SAM mask: composite object on white background and advance to needs_3d.
+
+    Request body:
+    {
+        "item_id": "abc123",
+        "points": [{"x": 100, "y": 200, "label": 1}, ...]
+    }
+    """
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    data = request.get_json()
+    item_id = data.get('item_id')
+    points = data.get('points', [])
+
+    if not item_id or not points:
+        return jsonify({"error": "item_id and points required", "success": False}), 400
+
+    item = db.library_items.find_one({"_id": item_id})
+    if not item:
+        return jsonify({"error": "Item not found", "success": False}), 404
+
+    image_path = item.get('original_image_path') or item.get('image_path')
+    if not image_path or not os.path.exists(image_path):
+        return jsonify({"error": "Image not found", "success": False}), 404
+
+    import sys
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    from gpu_lock import GPULock
+
+    gpu_lock = GPULock("flask_sam")
+    if not gpu_lock.acquire(timeout=30):
+        return jsonify({"error": "GPU is busy. Please retry.", "success": False}), 503
+
+    try:
+        sam = get_sam()
+        sam.check_auto_unload()
+        mask, score = sam.predict(item_id, image_path, points)
+
+        # Composite on white background
+        result_image = sam.composite_on_white(image_path, mask)
+
+        # Save masked image
+        upload_dir = os.path.dirname(image_path)
+        masked_path = os.path.join(upload_dir, "masked.png")
+        result_image.save(masked_path)
+
+        # Update item: set image_path to masked version, advance to needs_3d
+        db.library_items.update_one(
+            {"_id": item_id},
+            {"$set": {
+                "image_path": masked_path,
+                "status": "needs_3d",
+                "sam_points": points,
+                "sam_score": score,
+            }}
+        )
+
+        masked_url = _path_to_url(masked_path)
+        return jsonify({
+            "image_url": masked_url,
+            "score": score,
+            "status": "needs_3d",
+            "success": True
+        })
+
+    except Exception as e:
+        logger.error(f"SAM accept error: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+    finally:
+        gpu_lock.release()
+
+
+# ============== Page Routes ==============
+
 @app.route('/library-review/<library_id>')
 def library_review_page(library_id):
     """Library review UI page."""
@@ -1422,6 +1660,23 @@ def library_review_page(library_id):
         return "Library not found", 404
 
     return render_template('library_review.html', library=library)
+
+
+@app.route('/library-mask/<item_id>')
+def library_mask_page(item_id):
+    """Interactive SAM masking page for an uploaded library item."""
+    db = get_db()
+    if not db:
+        return "Database not available", 503
+
+    item = db.library_items.find_one({"_id": item_id})
+    if not item:
+        return "Item not found", 404
+
+    library = db.get_library(item["library_id"])
+    image_url = _path_to_url(item.get("original_image_path") or item.get("image_path"))
+
+    return render_template('library_mask.html', item=item, library=library, image_url=image_url)
 
 
 @app.route('/library-search')
@@ -1491,6 +1746,25 @@ def api_faiss_stats():
         return jsonify({"error": str(e), "success": False}), 500
 
 
+# ============== Environment Panoramas ==============
+
+@app.route('/api/environments')
+def list_environments():
+    """List available equirectangular environment panoramas."""
+    env_dir = os.path.join(MEDIA_FOLDER, 'environments')
+    if not os.path.isdir(env_dir):
+        return jsonify([])
+    exts = {'.jpg', '.jpeg', '.png', '.hdr', '.exr'}
+    envs = []
+    for f in sorted(os.listdir(env_dir)):
+        if os.path.splitext(f)[1].lower() in exts:
+            envs.append({
+                'name': os.path.splitext(f)[0],
+                'url': f'/media/environments/{f}',
+            })
+    return jsonify(envs)
+
+
 # ============== Media Routes ==============
 
 @app.route('/media/<path:filename>')
@@ -1503,6 +1777,16 @@ def serve_media(filename):
     if filename.endswith('.ply'):
         response.headers['Content-Type'] = 'application/octet-stream'
     return response
+
+
+@app.route('/download-cert')
+def download_cert():
+    """Download the self-signed certificate for mobile device installation."""
+    cert_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'certs', 'cert.pem')
+    if not os.path.exists(cert_path):
+        return "No certificate found. Start server with FLASK_HTTPS=true first.", 404
+    return send_file(cert_path, mimetype='application/x-pem-file',
+                     as_attachment=True, download_name='digital-dojo.pem')
 
 
 @app.route('/media/<path:filename>', methods=['OPTIONS'])
@@ -1546,12 +1830,83 @@ if __name__ == '__main__':
     print("  GET  /api/jobs          - List pending jobs")
     print("  POST /api/generate/sync - Run generation immediately (testing)")
     print("")
-    print("To process queued jobs, run the worker in another terminal:")
-    print("  python worker.py")
+    print("To process queued jobs, run workers in other terminals:")
+    print("  python worker.py              # SD3.5 image generation")
+    print("  python library_worker.py      # Library pipeline (SD3.5 + embeddings)")
+    print("  conda activate trellis2")
+    print("  python trellis2_worker.py     # 3D mesh generation (Trellis2)")
     print("")
 
     # Get port from environment or default
     port = int(os.getenv("FLASK_PORT", 5000))
     debug = os.getenv("FLASK_DEBUG", "true").lower() == "true"
+    use_https = os.getenv("FLASK_HTTPS", "false").lower() == "true"
 
-    app.run(debug=debug, host='0.0.0.0', port=port)
+    ssl_ctx = None
+    if use_https:
+        import socket
+        cert_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'certs')
+        cert_file = os.path.join(cert_dir, 'cert.pem')
+        key_file = os.path.join(cert_dir, 'key.pem')
+        if os.path.exists(cert_file) and os.path.exists(key_file):
+            ssl_ctx = (cert_file, key_file)
+            print(f"  HTTPS enabled (cert: {cert_dir}/)")
+        else:
+            try:
+                from OpenSSL import crypto
+                os.makedirs(cert_dir, exist_ok=True)
+
+                # Detect local IP addresses for SANs
+                san_entries = ['DNS:localhost', 'DNS:digital-dojo',
+                               'IP:127.0.0.1', 'IP:::1']
+                # Add extra IPs from env var (comma-separated)
+                extra_ips = os.getenv('FLASK_HTTPS_IPS', '')
+                for ip in extra_ips.split(','):
+                    ip = ip.strip()
+                    if ip:
+                        entry = f'IP:{ip}'
+                        if entry not in san_entries:
+                            san_entries.append(entry)
+                try:
+                    hostname = socket.gethostname()
+                    for info in socket.getaddrinfo(hostname, None):
+                        ip = info[4][0]
+                        entry = f'IP:{ip}'
+                        if entry not in san_entries:
+                            san_entries.append(entry)
+                except Exception:
+                    pass
+
+                k = crypto.PKey()
+                k.generate_key(crypto.TYPE_RSA, 2048)
+                cert = crypto.X509()
+                cert.get_subject().CN = 'digital-dojo'
+                cert.get_subject().O = 'Digital Dojo Dev'
+                cert.set_serial_number(1000)
+                cert.gmtime_adj_notBefore(0)
+                cert.gmtime_adj_notAfter(365 * 24 * 60 * 60)
+                cert.set_issuer(cert.get_subject())
+                cert.set_pubkey(k)
+                cert.add_extensions([
+                    crypto.X509Extension(b'basicConstraints', True, b'CA:TRUE'),
+                    crypto.X509Extension(b'subjectAltName', False,
+                                         ','.join(san_entries).encode()),
+                ])
+                cert.sign(k, 'sha256')
+                with open(cert_file, 'wb') as f:
+                    f.write(crypto.dump_certificate(crypto.FILETYPE_PEM, cert))
+                with open(key_file, 'wb') as f:
+                    f.write(crypto.dump_privatekey(crypto.FILETYPE_PEM, k))
+                ssl_ctx = (cert_file, key_file)
+                san_str = ', '.join(san_entries)
+                print(f"  HTTPS enabled (generated cert with SANs: {san_str})")
+            except ImportError:
+                print("  HTTPS requested but pyopenssl not installed.")
+                print("  Install with: pip install pyopenssl")
+        if ssl_ctx:
+            print(f"  Access via: https://<your-wsl-ip>:{port}/")
+            print(f"  Install cert on mobile: https://<ip>:{port}/download-cert")
+            print("  (Accept the browser security warning on first visit)")
+            print("")
+
+    app.run(debug=debug, host='0.0.0.0', port=port, ssl_context=ssl_ctx)
