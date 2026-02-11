@@ -1466,7 +1466,10 @@ def api_upload_images(library_id):
 
         # Save and resize image
         try:
-            img = PILImage.open(file.stream).convert("RGB")
+            from PIL import ImageOps
+            img = PILImage.open(file.stream)
+            img = ImageOps.exif_transpose(img)  # Apply EXIF rotation (phone cameras)
+            img = img.convert("RGB")
 
             # Resize if too large (max 2048px on long edge)
             max_edge = 2048
@@ -1532,14 +1535,17 @@ def api_sam_predict():
         sys.path.insert(0, script_dir)
     from gpu_lock import GPULock
 
-    gpu_lock = GPULock("flask_sam")
+    gpu_lock = GPULock("flask")
     if not gpu_lock.acquire(timeout=30):
         return jsonify({"error": "GPU is busy (another worker is running). Please retry in a moment.", "success": False}), 503
 
     try:
         sam = get_sam()
         sam.check_auto_unload()
-        mask, score = sam.predict(item_id, image_path, points)
+
+        # Use object_name from item as text prompt if available
+        text_prompt = item.get('object_name', '') if item else ''
+        mask, score = sam.predict_point(item_id, image_path, points, text_prompt=text_prompt or None)
 
         # Encode mask as base64 PNG
         import base64
@@ -1603,14 +1609,17 @@ def api_sam_accept():
         sys.path.insert(0, script_dir)
     from gpu_lock import GPULock
 
-    gpu_lock = GPULock("flask_sam")
+    gpu_lock = GPULock("flask")
     if not gpu_lock.acquire(timeout=30):
         return jsonify({"error": "GPU is busy. Please retry.", "success": False}), 503
 
     try:
         sam = get_sam()
         sam.check_auto_unload()
-        mask, score = sam.predict(item_id, image_path, points)
+
+        # Use object_name from item as text prompt if available
+        text_prompt = item.get('object_name', '') if item else ''
+        mask, score = sam.predict_point(item_id, image_path, points, text_prompt=text_prompt or None)
 
         # Composite on white background
         result_image = sam.composite_on_white(image_path, mask)
@@ -1763,6 +1772,509 @@ def list_environments():
                 'url': f'/media/environments/{f}',
             })
     return jsonify(envs)
+
+
+# ============== Catalog ==============
+
+@app.route('/catalog')
+def catalog_page():
+    """Flat catalog of all items across all libraries."""
+    return render_template('catalog.html')
+
+
+@app.route('/api/catalog/items', methods=['GET'])
+def api_catalog_items():
+    """
+    Get all items as a flat list, newest first.
+
+    Query params:
+        status: Filter by status (default: all)
+        limit: Max items (default: 100)
+    """
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    status = request.args.get('status', '')
+    limit = int(request.args.get('limit', 100))
+
+    query = {}
+    if status:
+        if status == 'processing':
+            query["status"] = {"$in": ["approved", "needs_3d", "needs_embedding"]}
+        else:
+            query["status"] = status
+
+    try:
+        items = list(
+            db.library_items.find(query)
+            .sort([("created_at", -1)])
+            .limit(limit)
+        )
+
+        for item in items:
+            item['_id'] = str(item['_id'])
+            if 'created_at' in item and item['created_at']:
+                item['created_at'] = item['created_at'].isoformat()
+            if item.get('image_path'):
+                item['image_path'] = _path_to_url(item['image_path'])
+            if item.get('asset_path'):
+                item['asset_path'] = _path_to_url(item['asset_path'])
+            if item.get('original_image_path'):
+                item['original_image_path'] = _path_to_url(item['original_image_path'])
+            item.pop('text_embedding', None)
+            item.pop('image_embedding', None)
+
+        return jsonify({"items": items, "count": len(items), "success": True})
+
+    except Exception as e:
+        logger.error(f"Failed to get catalog items: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+@app.route('/api/catalog/stats', methods=['GET'])
+def api_catalog_stats():
+    """Get status counts across all items."""
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    try:
+        stats = db.get_library_stats()
+        return jsonify({**stats, "success": True})
+    except Exception as e:
+        logger.error(f"Failed to get catalog stats: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+
+
+# ============== Capture Flow ==============
+
+@app.route('/capture')
+def capture_page():
+    """Phone-first capture UI: photograph → describe → mask → reconstruct → library."""
+    return render_template('capture.html')
+
+
+@app.route('/api/capture/upload', methods=['POST'])
+def api_capture_upload():
+    """
+    Upload a photo, auto-describe with VLM, auto-mask with SAM center-point.
+
+    Accepts multipart/form-data with 'image' file.
+    Returns: { item_id, description, mask_base64, score, image_url }
+    """
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    file = request.files.get('image')
+    if not file or not file.filename:
+        return jsonify({"error": "No image uploaded", "success": False}), 400
+
+    import uuid
+    from PIL import Image as PILImage
+
+    # Save uploaded image
+    output_dir = os.path.join(MEDIA_FOLDER, 'generated')
+    capture_id = uuid.uuid4().hex[:8]
+    capture_dir = os.path.join(output_dir, f"capture_{capture_id}")
+    os.makedirs(capture_dir, exist_ok=True)
+
+    try:
+        from PIL import ImageOps
+        img = PILImage.open(file.stream)
+        img = ImageOps.exif_transpose(img)  # Apply EXIF rotation (phone cameras)
+        img = img.convert("RGB")
+
+        # Resize if too large (max 2048px on long edge)
+        max_edge = 2048
+        if max(img.size) > max_edge:
+            ratio = max_edge / max(img.size)
+            new_size = (int(img.width * ratio), int(img.height * ratio))
+            img = img.resize(new_size, PILImage.LANCZOS)
+
+        original_path = os.path.join(capture_dir, "original.png")
+        img.save(original_path)
+        img_width, img_height = img.size
+    except Exception as e:
+        logger.error(f"Failed to save captured image: {e}")
+        return jsonify({"error": f"Failed to process image: {e}", "success": False}), 500
+
+    # Acquire GPU lock for VLM + SAM3 (both use GPU)
+    import sys
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    from gpu_lock import GPULock
+
+    description = ""
+    object_name = ""
+    mask_b64 = None
+    score = 0.0
+
+    gpu_lock = GPULock("flask")
+    if not gpu_lock.acquire(timeout=60):
+        # GPU busy — create item without VLM/SAM, user can still edit manually
+        logger.warning("GPU busy, skipping VLM + SAM3 auto-processing")
+        item_id = db.add_capture_item("", original_path)
+    else:
+        try:
+            # Step 1: VLM — describe object and identify main object name
+            try:
+                from services.vlm_service import describe_and_identify
+                ollama = get_ollama()
+                vlm_result = describe_and_identify(ollama, original_path)
+                description = vlm_result.get("description", "")
+                object_name = vlm_result.get("object_name", "")
+                # Unload VLM from VRAM before loading SAM3
+                ollama.unload_model()
+            except Exception as e:
+                logger.warning(f"VLM failed (continuing without description): {e}")
+
+            # Create database item
+            item_id = db.add_capture_item(description, original_path)
+
+            # Store object_name on item for later refinement
+            if object_name:
+                db.library_items.update_one(
+                    {"_id": item_id},
+                    {"$set": {"object_name": object_name}}
+                )
+
+            # Step 2: SAM3 — auto-mask using VLM-identified object name as text prompt
+            try:
+                sam = get_sam()
+                sam.check_auto_unload()
+
+                text_prompt = object_name or "object"
+                mask, score = sam.predict_text(item_id, original_path, text_prompt)
+
+                # Encode mask as base64 PNG
+                import base64
+                from io import BytesIO
+                mask_uint8 = (mask * 255).astype('uint8')
+                mask_img = PILImage.fromarray(mask_uint8, mode='L')
+                buffer = BytesIO()
+                mask_img.save(buffer, format='PNG')
+                mask_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            except Exception as e:
+                logger.warning(f"SAM3 auto-mask failed (continuing without): {e}")
+        finally:
+            gpu_lock.release()
+
+    image_url = _path_to_url(original_path)
+
+    return jsonify({
+        "item_id": item_id,
+        "description": description,
+        "object_name": object_name,
+        "mask_base64": mask_b64,
+        "score": float(score),
+        "image_url": image_url,
+        "width": img_width,
+        "height": img_height,
+        "success": True
+    })
+
+
+@app.route('/api/capture/refine-mask', methods=['POST'])
+def api_capture_refine_mask():
+    """
+    Refine SAM mask with user-provided points.
+
+    Request body: { "item_id": "abc", "points": [{"x":100,"y":200,"label":1}, ...] }
+    Returns: { mask_base64, score }
+    """
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    data = request.get_json()
+    item_id = data.get('item_id')
+    points = data.get('points', [])
+
+    if not item_id or not points:
+        return jsonify({"error": "item_id and points required", "success": False}), 400
+
+    item = db.library_items.find_one({"_id": item_id})
+    if not item:
+        return jsonify({"error": "Item not found", "success": False}), 404
+
+    image_path = item.get('original_image_path') or item.get('image_path')
+    if not image_path or not os.path.exists(image_path):
+        return jsonify({"error": "Image not found", "success": False}), 404
+
+    import sys
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    from gpu_lock import GPULock
+
+    gpu_lock = GPULock("flask")
+    if not gpu_lock.acquire(timeout=30):
+        return jsonify({"error": "GPU is busy. Please retry.", "success": False}), 503
+
+    try:
+        sam = get_sam()
+        sam.check_auto_unload()
+
+        # Use stored object_name as text prompt for SAM3 refinement
+        text_prompt = item.get('object_name', '')
+        mask, score = sam.predict_point(item_id, image_path, points, text_prompt=text_prompt or None)
+
+        import base64
+        from io import BytesIO
+        from PIL import Image as PILImage
+
+        mask_uint8 = (mask * 255).astype('uint8')
+        mask_img = PILImage.fromarray(mask_uint8, mode='L')
+        buffer = BytesIO()
+        mask_img.save(buffer, format='PNG')
+        mask_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+
+        return jsonify({
+            "mask_base64": mask_b64,
+            "score": float(score),
+            "width": mask.shape[1],
+            "height": mask.shape[0],
+            "success": True
+        })
+    except Exception as e:
+        logger.error(f"Capture refine-mask error: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+    finally:
+        gpu_lock.release()
+
+
+@app.route('/api/capture/reconstruct', methods=['POST'])
+def api_capture_reconstruct():
+    """
+    Accept mask, composite on white, set status to needs_3d for Trellis2.
+
+    Request body: { "item_id": "abc", "description": "edited desc", "points": [...] }
+    """
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    data = request.get_json()
+    item_id = data.get('item_id')
+    description = data.get('description', '').strip()
+    points = data.get('points', [])
+
+    if not item_id:
+        return jsonify({"error": "item_id required", "success": False}), 400
+
+    item = db.library_items.find_one({"_id": item_id})
+    if not item:
+        return jsonify({"error": "Item not found", "success": False}), 404
+
+    image_path = item.get('original_image_path') or item.get('image_path')
+    if not image_path or not os.path.exists(image_path):
+        return jsonify({"error": "Image not found", "success": False}), 404
+
+    import sys
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    from gpu_lock import GPULock
+
+    gpu_lock = GPULock("flask")
+    if not gpu_lock.acquire(timeout=30):
+        return jsonify({"error": "GPU is busy. Please retry.", "success": False}), 503
+
+    try:
+        sam = get_sam()
+        sam.check_auto_unload()
+
+        # Use stored object_name as text prompt for SAM3
+        text_prompt = item.get('object_name', '')
+
+        if points:
+            mask, score = sam.predict_point(item_id, image_path, points, text_prompt=text_prompt or None)
+        else:
+            # No refinement points — re-run text-only prediction
+            mask, score = sam.predict_text(item_id, image_path, text_prompt or "object")
+
+        # Composite on white background
+        result_image = sam.composite_on_white(image_path, mask)
+
+        # Save masked image
+        upload_dir = os.path.dirname(image_path)
+        masked_path = os.path.join(upload_dir, "masked.png")
+        result_image.save(masked_path)
+
+        # Update item: set masked image, description, advance to needs_3d
+        update = {
+            "image_path": masked_path,
+            "status": "needs_3d",
+            "sam_score": float(score),
+        }
+        if points:
+            update["sam_points"] = points
+        if description:
+            update["description"] = description
+
+        db.library_items.update_one({"_id": item_id}, {"$set": update})
+
+        return jsonify({
+            "item_id": item_id,
+            "status": "needs_3d",
+            "image_url": _path_to_url(masked_path),
+            "score": float(score),
+            "success": True
+        })
+    except Exception as e:
+        logger.error(f"Capture reconstruct error: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+    finally:
+        gpu_lock.release()
+
+
+@app.route('/api/capture/<item_id>/status', methods=['GET'])
+def api_capture_status(item_id):
+    """Poll item status during Trellis2 processing."""
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    item = db.library_items.find_one({"_id": item_id})
+    if not item:
+        return jsonify({"error": "Item not found", "success": False}), 404
+
+    status = item.get('status', 'unknown')
+    result = {
+        "item_id": item_id,
+        "status": status,
+        "description": item.get('description', ''),
+        "success": True
+    }
+
+    # Trellis2 done: capture items → 'reconstructed', other items → 'needs_embedding'
+    if status in ('reconstructed', 'needs_embedding', 'ready'):
+        asset_path = item.get('asset_path')
+        if asset_path:
+            result["asset_url"] = _path_to_url(asset_path)
+            result["asset_type"] = item.get('asset_type', 'mesh')
+        # Normalize to 'reconstructed' for the capture UI
+        if status in ('needs_embedding', 'reconstructed'):
+            result["status"] = "reconstructed"
+
+    if item.get('error'):
+        result["error"] = item['error']
+
+    return jsonify(result)
+
+
+@app.route('/api/capture/<item_id>/approve', methods=['POST'])
+def api_capture_approve(item_id):
+    """Approve 3D model: run inline CLIP encoding and set status to ready."""
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    item = db.library_items.find_one({"_id": item_id})
+    if not item:
+        return jsonify({"error": "Item not found", "success": False}), 404
+
+    status = item.get('status')
+    if status == 'ready':
+        # Already approved and encoded
+        return jsonify({"item_id": item_id, "status": "ready", "success": True})
+    if status not in ('reconstructed', 'needs_embedding'):
+        return jsonify({"error": f"Item not ready for approval (status: {status})", "success": False}), 400
+
+    # Inline CLIP/FLAIR encoding
+    import sys
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    from gpu_lock import GPULock
+
+    gpu_lock = GPULock("flask")
+    if not gpu_lock.acquire(timeout=30):
+        return jsonify({"error": "GPU is busy. Please retry.", "success": False}), 503
+
+    try:
+        from services.embedding_service import get_embedding_service
+        embed_svc = get_embedding_service()
+
+        description = item.get('description', '')
+        image_path = item.get('image_path') or item.get('original_image_path')
+
+        text_emb = None
+        image_emb = None
+
+        if description:
+            text_emb = embed_svc.encode_text(description)
+            if text_emb is not None and not isinstance(text_emb, list):
+                text_emb = text_emb.tolist()
+
+        if image_path and os.path.exists(image_path):
+            image_emb = embed_svc.encode_image(image_path)
+            if image_emb is not None and not isinstance(image_emb, list):
+                image_emb = image_emb.tolist()
+
+        db.library_items.update_one(
+            {"_id": item_id},
+            {"$set": {
+                "status": "ready",
+                "text_embedding": text_emb,
+                "image_embedding": image_emb,
+            }}
+        )
+
+        return jsonify({
+            "item_id": item_id,
+            "status": "ready",
+            "has_text_embedding": text_emb is not None,
+            "has_image_embedding": image_emb is not None,
+            "success": True
+        })
+    except Exception as e:
+        logger.error(f"Capture approve/embed error: {e}")
+        return jsonify({"error": str(e), "success": False}), 500
+    finally:
+        gpu_lock.release()
+
+
+@app.route('/api/capture/<item_id>/reject', methods=['POST'])
+def api_capture_reject(item_id):
+    """Reject and delete a capture item and its files."""
+    db = get_db()
+    if not db:
+        return jsonify({"error": "Database not available", "success": False}), 503
+
+    item = db.library_items.find_one({"_id": item_id})
+    if not item:
+        return jsonify({"error": "Item not found", "success": False}), 404
+
+    # Delete files
+    import shutil
+    for path_key in ('original_image_path', 'image_path'):
+        path = item.get(path_key)
+        if path and os.path.exists(path):
+            parent_dir = os.path.dirname(path)
+            if os.path.basename(parent_dir).startswith('capture_'):
+                try:
+                    shutil.rmtree(parent_dir)
+                    logger.info(f"Deleted capture directory: {parent_dir}")
+                except Exception as e:
+                    logger.warning(f"Failed to delete {parent_dir}: {e}")
+                break
+
+    # Delete asset file if exists
+    asset_path = item.get('asset_path')
+    if asset_path and os.path.exists(asset_path):
+        try:
+            os.remove(asset_path)
+        except Exception as e:
+            logger.warning(f"Failed to delete asset {asset_path}: {e}")
+
+    # Delete from database
+    db.library_items.delete_one({"_id": item_id})
+
+    return jsonify({"deleted": True, "success": True})
 
 
 # ============== Media Routes ==============

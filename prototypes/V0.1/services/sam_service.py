@@ -1,11 +1,12 @@
 """
-SAM (Segment Anything) service for interactive object masking.
+SAM3 Service - Text-prompted object segmentation using Meta SAM 3.
 
-Lazy-loads SAM vit_h, caches image encodings per item, and provides
-mask prediction from point prompts + white-background compositing.
+Lazy-loads SAM3, caches image encodings per item, and provides
+text-prompted mask prediction + white-background compositing.
 """
 import os
 import gc
+import sys
 import time
 import logging
 
@@ -15,82 +16,87 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-SAM_CHECKPOINT = os.getenv(
-    "SAM_CHECKPOINT",
-    "/mnt/c/Users/david/Documents/GitHub/sam3/sam_vit_h_4b8939.pth"
+SAM3_REPO_PATH = os.getenv(
+    "SAM3_REPO_PATH",
+    "c:/Users/david/Documents/GitHub/sam3"
 )
-SAM_MODEL_TYPE = os.getenv("SAM_MODEL_TYPE", "vit_h")
-SAM_AUTO_UNLOAD_SECONDS = int(os.getenv("SAM_AUTO_UNLOAD_SECONDS", "60"))
+SAM3_AUTO_UNLOAD_SECONDS = int(os.getenv("SAM3_AUTO_UNLOAD_SECONDS", "120"))
 
 
-class SAMService:
+class SAM3Service:
     def __init__(self):
-        self.predictor = None
-        self.sam_model = None
+        self.model = None
+        self.processor = None
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self._cached_item_id = None
+        self._cached_state = None
         self._last_use_time = 0
 
     @property
     def loaded(self):
-        return self.predictor is not None
+        return self.processor is not None
 
     def load(self):
-        """Lazy-load SAM model (~2.5GB VRAM for vit_h)."""
-        if self.predictor is not None:
+        """Lazy-load SAM3 model."""
+        if self.processor is not None:
             self._last_use_time = time.time()
             return
 
-        logger.info(f"Loading SAM ({SAM_MODEL_TYPE}) from {SAM_CHECKPOINT}")
-        from segment_anything import sam_model_registry, SamPredictor
+        # Add SAM3 to path
+        if SAM3_REPO_PATH not in sys.path:
+            sys.path.insert(0, SAM3_REPO_PATH)
 
-        self.sam_model = sam_model_registry[SAM_MODEL_TYPE](checkpoint=SAM_CHECKPOINT)
-        self.sam_model.to(device=self.device)
-        self.predictor = SamPredictor(self.sam_model)
+        logger.info("Loading SAM3 model...")
+        from sam3.model_builder import build_sam3_image_model
+        from sam3.model.sam3_image_processor import Sam3Processor
+
+        self.model = build_sam3_image_model(device=self.device)
+        self.processor = Sam3Processor(self.model, device=self.device)
         self._last_use_time = time.time()
-        logger.info("SAM loaded")
+        logger.info("SAM3 loaded")
 
     def unload(self):
         """Free GPU memory."""
-        if self.predictor is None:
+        if self.processor is None:
             return
-        logger.info("Unloading SAM from GPU")
-        del self.predictor
-        del self.sam_model
-        self.predictor = None
-        self.sam_model = None
+        logger.info("Unloading SAM3 from GPU")
+        del self.processor
+        del self.model
+        self.processor = None
+        self.model = None
         self._cached_item_id = None
+        self._cached_state = None
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
     def check_auto_unload(self):
-        """Unload if idle for too long. Call at start of each request."""
-        if self.predictor is None:
+        """Unload if idle for too long."""
+        if self.processor is None:
             return
-        if SAM_AUTO_UNLOAD_SECONDS > 0:
+        if SAM3_AUTO_UNLOAD_SECONDS > 0:
             idle = time.time() - self._last_use_time
-            if idle > SAM_AUTO_UNLOAD_SECONDS:
-                logger.info(f"SAM idle for {idle:.0f}s, auto-unloading")
+            if idle > SAM3_AUTO_UNLOAD_SECONDS:
+                logger.info(f"SAM3 idle for {idle:.0f}s, auto-unloading")
                 self.unload()
 
     def _set_image(self, item_id, image_path):
-        """Encode image for SAM. Cached per item_id."""
-        if self._cached_item_id == item_id:
+        """Encode image for SAM3. Cached per item_id."""
+        if self._cached_item_id == item_id and self._cached_state is not None:
             return
-        logger.info(f"Encoding image for SAM: {image_path}")
-        image_np = np.array(Image.open(image_path).convert("RGB"))
-        self.predictor.set_image(image_np)
+        logger.info(f"Encoding image for SAM3: {image_path}")
+        image = Image.open(image_path).convert("RGB")
+        self._cached_state = self.processor.set_image(image)
         self._cached_item_id = item_id
 
-    def predict(self, item_id, image_path, points):
+    def predict_text(self, item_id, image_path, text_prompt):
         """
-        Run SAM prediction from point prompts.
+        Run SAM3 text-prompted segmentation.
 
         Args:
             item_id: Item ID (for image encoding cache)
             image_path: Path to the original image
-            points: List of dicts with x, y, label (1=foreground, 0=background)
+            text_prompt: Object name to segment (e.g. "coffee mug")
 
         Returns:
             (mask_array, score) where mask_array is boolean [H, W]
@@ -99,17 +105,93 @@ class SAMService:
         self._set_image(item_id, image_path)
         self._last_use_time = time.time()
 
-        coords = np.array([[p["x"], p["y"]] for p in points])
-        labels = np.array([p["label"] for p in points])
+        # Reset any previous prompts (keeps image encoding)
+        self.processor.reset_all_prompts(self._cached_state)
 
-        masks, scores, _ = self.predictor.predict(
-            point_coords=coords,
-            point_labels=labels,
-            multimask_output=True,
+        # Run text-prompted segmentation
+        state = self.processor.set_text_prompt(
+            prompt=text_prompt,
+            state=self._cached_state
         )
+        self._cached_state = state
 
-        best_idx = np.argmax(scores)
-        return masks[best_idx], float(scores[best_idx])
+        if 'masks' not in state or state['masks'].numel() == 0:
+            img = Image.open(image_path)
+            h, w = img.height, img.width
+            return np.zeros((h, w), dtype=bool), 0.0
+
+        scores = state['scores']
+        masks = state['masks']  # [N, 1, H, W]
+
+        best_idx = scores.argmax().item()
+        best_mask = masks[best_idx, 0].cpu().numpy()  # [H, W] boolean
+        best_score = float(scores[best_idx].item())
+
+        logger.info(f"SAM3 text prompt '{text_prompt}': score={best_score:.3f}, "
+                     f"{masks.shape[0]} candidates")
+        return best_mask, best_score
+
+    def predict_point(self, item_id, image_path, points, text_prompt=None):
+        """
+        Run SAM3 with geometric (box) prompts from user click points.
+        Converts click points to small boxes for SAM3's geometric prompt API.
+
+        Args:
+            item_id: Item ID (for image encoding cache)
+            image_path: Path to the original image
+            points: List of dicts with x, y (pixel coords), label (1=fg, 0=bg)
+            text_prompt: Optional text prompt to combine with geometric prompts
+
+        Returns:
+            (mask_array, score) where mask_array is boolean [H, W]
+        """
+        self.load()
+        self._set_image(item_id, image_path)
+        self._last_use_time = time.time()
+
+        img = Image.open(image_path)
+        img_w, img_h = img.size
+
+        # Reset prompts (keeps image encoding)
+        self.processor.reset_all_prompts(self._cached_state)
+
+        # Re-encode image since reset clears backbone features we need
+        image = Image.open(image_path).convert("RGB")
+        self._cached_state = self.processor.set_image(image)
+
+        # Set text prompt if provided
+        if text_prompt:
+            self._cached_state = self.processor.set_text_prompt(
+                prompt=text_prompt,
+                state=self._cached_state
+            )
+
+        # Add geometric prompts from points (convert to small boxes)
+        box_size = 0.02  # 2% of image dimension
+        for p in points:
+            cx = p['x'] / img_w  # normalize to [0, 1]
+            cy = p['y'] / img_h
+            box = [cx, cy, box_size, box_size]
+            label = bool(p['label'])
+            self._cached_state = self.processor.add_geometric_prompt(
+                box=box,
+                label=label,
+                state=self._cached_state
+            )
+
+        state = self._cached_state
+
+        if 'masks' not in state or state['masks'].numel() == 0:
+            return np.zeros((img_h, img_w), dtype=bool), 0.0
+
+        scores = state['scores']
+        masks = state['masks']
+
+        best_idx = scores.argmax().item()
+        best_mask = masks[best_idx, 0].cpu().numpy()
+        best_score = float(scores[best_idx].item())
+
+        return best_mask, best_score
 
     def composite_on_white(self, image_path, mask, output_size=1024):
         """
@@ -161,11 +243,11 @@ class SAMService:
 
 
 # Singleton
-_sam_service = None
+_sam3_service = None
 
 
 def get_sam_service():
-    global _sam_service
-    if _sam_service is None:
-        _sam_service = SAMService()
-    return _sam_service
+    global _sam3_service
+    if _sam3_service is None:
+        _sam3_service = SAM3Service()
+    return _sam3_service

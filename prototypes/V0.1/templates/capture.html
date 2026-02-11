@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Capture Object</title>
+    <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.4.0/model-viewer.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body {
+            height: 100%;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1e1e1e;
+            color: #ccc;
+            overflow: hidden;
+            touch-action: manipulation;
+        }
+
+        body {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            height: 48px;
+            background: #2d2d2d;
+            border-bottom: 1px solid #404040;
+            display: flex;
+            align-items: center;
+            padding: 0 16px;
+            gap: 12px;
+            flex-shrink: 0;
+        }
+
+        .header h1 {
+            font-size: 16px;
+            font-weight: 500;
+            color: #fff;
+        }
+
+        .header .status-text {
+            margin-left: auto;
+            font-size: 12px;
+            color: #888;
+        }
+
+        .main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* --- State: Capture --- */
+        .state { display: none; flex-direction: column; height: 100%; }
+        .state.active { display: flex; }
+
+        #state-capture {
+            align-items: center;
+            justify-content: center;
+            gap: 24px;
+            padding: 24px;
+        }
+
+        #state-capture .capture-hint {
+            font-size: 18px;
+            color: #aaa;
+            text-align: center;
+        }
+
+        .capture-btn {
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            border: 4px solid #0e639c;
+            background: rgba(14, 99, 156, 0.15);
+            color: #0e639c;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+        }
+
+        .capture-btn:active {
+            background: rgba(14, 99, 156, 0.4);
+            transform: scale(0.95);
+        }
+
+        input[type="file"] { display: none; }
+
+        /* --- State: Processing --- */
+        #state-processing {
+            align-items: center;
+            justify-content: center;
+            gap: 16px;
+        }
+
+        .spinner {
+            width: 48px;
+            height: 48px;
+            border: 4px solid #404040;
+            border-top-color: #0e639c;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .processing-text {
+            font-size: 16px;
+            color: #aaa;
+        }
+
+        /* --- State: Review --- */
+        #state-review {
+            flex-direction: column;
+        }
+
+        .review-canvas-area {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #1a1a1a;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .review-canvas-area canvas {
+            cursor: crosshair;
+            max-width: 100%;
+            max-height: 100%;
+            touch-action: none;
+        }
+
+        .review-controls {
+            background: #2d2d2d;
+            border-top: 1px solid #404040;
+            padding: 12px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            flex-shrink: 0;
+        }
+
+        .review-controls textarea {
+            width: 100%;
+            background: #3c3c3c;
+            border: 1px solid #555;
+            border-radius: 6px;
+            color: #fff;
+            padding: 8px 10px;
+            font-size: 14px;
+            font-family: inherit;
+            resize: none;
+            height: 48px;
+        }
+
+        .review-controls textarea:focus {
+            outline: none;
+            border-color: #0e639c;
+        }
+
+        .review-buttons {
+            display: flex;
+            gap: 8px;
+        }
+
+        .review-info {
+            display: flex;
+            gap: 12px;
+            font-size: 12px;
+            color: #888;
+            align-items: center;
+        }
+
+        .review-info .score { color: #4caf50; font-weight: 600; }
+
+        .btn {
+            padding: 10px 18px;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn-primary {
+            background: #0e639c;
+            color: white;
+        }
+
+        .review-buttons .btn-primary { flex: 1; }
+
+        .btn-primary:hover:not(:disabled) { background: #1177bb; }
+
+        .btn-secondary {
+            background: #3c3c3c;
+            color: #ccc;
+        }
+
+        .btn-secondary:hover:not(:disabled) { background: #4c4c4c; }
+
+        .btn-danger {
+            background: #c62828;
+            color: white;
+        }
+
+        .btn-danger:hover:not(:disabled) { background: #e53935; }
+
+        .btn-success {
+            background: #2e7d32;
+            color: white;
+            flex: 1;
+        }
+
+        .btn-success:hover:not(:disabled) { background: #388e3c; }
+
+        /* --- State: Reconstructing --- */
+        #state-reconstructing {
+            align-items: center;
+            justify-content: center;
+            gap: 16px;
+        }
+
+        /* --- State: Preview 3D --- */
+        #state-preview {
+            flex-direction: column;
+        }
+
+        .preview-viewer {
+            flex: 1;
+            position: relative;
+        }
+
+        .preview-viewer model-viewer {
+            width: 100%;
+            height: 100%;
+            --poster-color: #1e1e1e;
+        }
+
+        .preview-controls {
+            background: #2d2d2d;
+            border-top: 1px solid #404040;
+            padding: 12px 16px;
+            display: flex;
+            gap: 8px;
+            flex-shrink: 0;
+        }
+
+        /* --- State: Done --- */
+        #state-done {
+            align-items: center;
+            justify-content: center;
+            gap: 16px;
+        }
+
+        .done-icon {
+            width: 64px;
+            height: 64px;
+            border-radius: 50%;
+            background: #2e7d32;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 32px;
+            color: white;
+        }
+
+        .done-text {
+            font-size: 18px;
+            color: #aaa;
+        }
+
+        /* Loading overlay */
+        .loading-overlay {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.75);
+            color: white;
+            padding: 12px 20px;
+            border-radius: 8px;
+            font-size: 14px;
+            z-index: 10;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <a href="/catalog" style="color:#aaa; text-decoration:none; font-size:20px; line-height:1">&larr;</a>
+        <h1>Capture Object</h1>
+        <span class="status-text" id="status-text"></span>
+    </div>
+
+    <div class="main">
+        <!-- State: Capture -->
+        <div class="state active" id="state-capture">
+            <p class="capture-hint">Take a photo of an object to add to your library</p>
+            <button class="capture-btn" onclick="document.getElementById('file-input').click()">
+                Capture
+            </button>
+            <input type="file" id="file-input" accept="image/*" capture="environment" onchange="handleCapture(this)">
+        </div>
+
+        <!-- State: Processing -->
+        <div class="state" id="state-processing">
+            <div class="spinner"></div>
+            <span class="processing-text" id="processing-text">Analyzing image...</span>
+        </div>
+
+        <!-- State: Review -->
+        <div class="state" id="state-review">
+            <div class="review-canvas-area">
+                <canvas id="canvas"></canvas>
+                <div class="loading-overlay" id="mask-loading">Refining mask...</div>
+            </div>
+            <div class="review-controls">
+                <textarea id="description-input" placeholder="Object description..."></textarea>
+                <div class="review-info">
+                    <span>Refinements: <strong id="point-count">0</strong></span>
+                    <span>Score: <span class="score" id="score">-</span></span>
+                    <span style="margin-left:auto; color:#666; font-size:11px">Tap: select | Long-press: exclude</span>
+                </div>
+                <div class="review-buttons">
+                    <button class="btn btn-secondary" onclick="clearMask()">Clear</button>
+                    <button class="btn btn-secondary" onclick="undoPoint()">Undo</button>
+                    <button class="btn btn-secondary" onclick="retake()">Retake</button>
+                    <button class="btn btn-primary" id="reconstruct-btn" onclick="reconstruct()">Reconstruct</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- State: Reconstructing -->
+        <div class="state" id="state-reconstructing">
+            <div class="spinner"></div>
+            <span class="processing-text">Building 3D model...</span>
+            <span class="processing-text" style="font-size:12px; color:#666" id="recon-status">Waiting for Trellis2...</span>
+        </div>
+
+        <!-- State: 3D Preview -->
+        <div class="state" id="state-preview">
+            <div class="preview-viewer">
+                <model-viewer id="model-viewer"
+                    camera-controls
+                    touch-action="pan-y"
+                    auto-rotate
+                    shadow-intensity="1"
+                    environment-image="neutral"
+                    exposure="2.0"
+                ></model-viewer>
+            </div>
+            <div class="preview-controls">
+                <button class="btn btn-danger" onclick="rejectItem()">Reject</button>
+                <button class="btn btn-success" id="approve-btn" onclick="approveItem()">Add to Library</button>
+            </div>
+        </div>
+
+        <!-- State: Done -->
+        <div class="state" id="state-done">
+            <div class="done-icon">&#10003;</div>
+            <span class="done-text">Added to library</span>
+            <button class="btn btn-primary" onclick="startOver()" style="margin-top:8px">Capture Another</button>
+        </div>
+    </div>
+
+    <script>
+        // --- State management ---
+        let currentState = 'capture';
+        let itemId = null;
+        let pollTimer = null;
+
+        function setState(name) {
+            document.querySelectorAll('.state').forEach(el => el.classList.remove('active'));
+            document.getElementById('state-' + name).classList.add('active');
+            currentState = name;
+            document.getElementById('status-text').textContent =
+                { capture: '', processing: 'Processing...', review: 'Review & refine',
+                  reconstructing: 'Reconstructing...', preview: '3D Preview', done: '' }[name] || '';
+        }
+
+        // --- Canvas / mask state ---
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let image = null;
+        let maskImage = null;
+        let points = [];
+        let predicting = false;
+        let imgWidth = 0, imgHeight = 0;
+        let objectName = '';  // VLM-identified object name (used as SAM3 text prompt)
+
+        // --- Capture ---
+        async function handleCapture(input) {
+            const file = input.files[0];
+            if (!file) return;
+
+            setState('processing');
+            document.getElementById('processing-text').textContent = 'Uploading and analyzing...';
+
+            const formData = new FormData();
+            formData.append('image', file);
+
+            try {
+                const res = await fetch('/api/capture/upload', { method: 'POST', body: formData });
+                const data = await res.json();
+
+                if (!data.success) {
+                    alert('Upload failed: ' + (data.error || 'Unknown error'));
+                    setState('capture');
+                    return;
+                }
+
+                itemId = data.item_id;
+                imgWidth = data.width;
+                imgHeight = data.height;
+                objectName = data.object_name || '';
+
+                // Set description
+                document.getElementById('description-input').value = data.description || '';
+
+                // Load image into canvas
+                image = new Image();
+                image.crossOrigin = 'anonymous';
+                image.onload = () => {
+                    canvas.width = image.naturalWidth;
+                    canvas.height = image.naturalHeight;
+
+                    // No initial points — SAM3 uses text prompt from VLM
+                    points = [];
+
+                    // Draw image immediately
+                    redraw();
+                    setState('review');
+
+                    // Overlay the text-prompted mask from SAM3
+                    if (data.mask_base64) {
+                        document.getElementById('score').textContent = data.score.toFixed(3);
+                        document.getElementById('point-count').textContent = '0';
+                        applyMaskBase64(data.mask_base64, imgWidth, imgHeight);
+                    }
+                };
+                image.src = data.image_url;
+
+            } catch (e) {
+                console.error('Capture error:', e);
+                alert('Failed to upload: ' + e.message);
+                setState('capture');
+            }
+
+            // Reset file input for re-capture
+            input.value = '';
+        }
+
+        // --- Mask rendering ---
+        function applyMaskBase64(b64, w, h) {
+            const maskImg = new Image();
+            maskImg.onload = () => {
+                // Draw grayscale mask to temp canvas and colorize
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = w;
+                tempCanvas.height = h;
+                const tempCtx = tempCanvas.getContext('2d');
+                tempCtx.drawImage(maskImg, 0, 0);
+                const imgData = tempCtx.getImageData(0, 0, w, h);
+                const pixels = imgData.data;
+
+                for (let i = 0; i < pixels.length; i += 4) {
+                    if (pixels[i] > 128) {
+                        pixels[i] = 50;
+                        pixels[i + 1] = 120;
+                        pixels[i + 2] = 255;
+                        pixels[i + 3] = 255;
+                    } else {
+                        pixels[i + 3] = 0;
+                    }
+                }
+                tempCtx.putImageData(imgData, 0, 0);
+
+                // Use the canvas directly as maskImage (avoids toDataURL→Image Safari issues)
+                maskImage = tempCanvas;
+                redraw();
+            };
+            maskImg.src = 'data:image/png;base64,' + b64;
+        }
+
+        function redraw() {
+            if (!image) return;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(image, 0, 0);
+
+            if (maskImage) {
+                ctx.globalAlpha = 0.35;
+                ctx.drawImage(maskImage, 0, 0);
+                ctx.globalAlpha = 1.0;
+            }
+
+            for (const p of points) {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, Math.max(8, canvas.width * 0.008), 0, Math.PI * 2);
+                ctx.fillStyle = p.label === 1 ? '#00ff00' : '#ff0000';
+                ctx.fill();
+                ctx.strokeStyle = 'white';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+        }
+
+        // --- Touch/click on canvas ---
+        let longPressTimer = null;
+        let isLongPress = false;
+
+        canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+        // Mouse events (desktop)
+        canvas.addEventListener('mousedown', (e) => {
+            if (predicting) return;
+            e.preventDefault();
+            const label = e.button === 0 ? 1 : 0;
+            addPoint(e.clientX, e.clientY, label);
+        });
+
+        // Touch events (mobile) - tap = foreground, long-press = background
+        canvas.addEventListener('touchstart', (e) => {
+            if (predicting) return;
+            e.preventDefault();
+            const touch = e.touches[0];
+            isLongPress = false;
+            longPressTimer = setTimeout(() => {
+                isLongPress = true;
+                addPoint(touch.clientX, touch.clientY, 0); // background
+            }, 400);
+        }, { passive: false });
+
+        canvas.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            if (longPressTimer) {
+                clearTimeout(longPressTimer);
+                longPressTimer = null;
+            }
+            if (!isLongPress && !predicting) {
+                const touch = e.changedTouches[0];
+                addPoint(touch.clientX, touch.clientY, 1); // foreground
+            }
+            isLongPress = false;
+        }, { passive: false });
+
+        canvas.addEventListener('touchmove', (e) => {
+            // Cancel long-press if finger moves
+            if (longPressTimer) {
+                clearTimeout(longPressTimer);
+                longPressTimer = null;
+            }
+        }, { passive: false });
+
+        function addPoint(clientX, clientY, label) {
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            const x = Math.round((clientX - rect.left) * scaleX);
+            const y = Math.round((clientY - rect.top) * scaleY);
+
+            points.push({ x, y, label });
+            redraw();
+            runPredict();
+        }
+
+        async function runPredict() {
+            if (points.length === 0 || !itemId) return;
+
+            predicting = true;
+            document.getElementById('mask-loading').style.display = 'block';
+            document.getElementById('point-count').textContent = points.length;
+
+            try {
+                const res = await fetch('/api/capture/refine-mask', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ item_id: itemId, points })
+                });
+                const data = await res.json();
+
+                if (!data.success) {
+                    alert('Mask error: ' + data.error);
+                    return;
+                }
+
+                document.getElementById('score').textContent = data.score.toFixed(3);
+                applyMaskBase64(data.mask_base64, data.width, data.height);
+
+            } catch (e) {
+                console.error('Predict error:', e);
+            } finally {
+                predicting = false;
+                document.getElementById('mask-loading').style.display = 'none';
+            }
+        }
+
+        function clearMask() {
+            points = [];
+            maskImage = null;
+            document.getElementById('point-count').textContent = '0';
+            document.getElementById('score').textContent = '-';
+            redraw();
+            // Note: text-prompted mask from SAM3 is cleared.
+            // User can tap to add refinement points, or Reconstruct will re-run text-only mask.
+        }
+
+        function undoPoint() {
+            if (points.length === 0) return;
+            points.pop();
+            document.getElementById('point-count').textContent = points.length;
+            if (points.length === 0) {
+                maskImage = null;
+                document.getElementById('score').textContent = '-';
+                redraw();
+            } else {
+                runPredict();
+            }
+        }
+
+        function retake() {
+            if (itemId) {
+                fetch(`/api/capture/${itemId}/reject`, { method: 'POST' }).catch(() => {});
+            }
+            startOver();
+        }
+
+        // --- Reconstruct ---
+        async function reconstruct() {
+            const description = document.getElementById('description-input').value.trim();
+            const btn = document.getElementById('reconstruct-btn');
+            btn.disabled = true;
+
+            try {
+                // Points may be empty if user accepted the text-prompted mask as-is
+                const res = await fetch('/api/capture/reconstruct', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ item_id: itemId, description, points })
+                });
+                const data = await res.json();
+
+                if (!data.success) {
+                    alert('Reconstruct error: ' + data.error);
+                    btn.disabled = false;
+                    return;
+                }
+
+                setState('reconstructing');
+                startPolling();
+
+            } catch (e) {
+                console.error('Reconstruct error:', e);
+                alert('Failed: ' + e.message);
+                btn.disabled = false;
+            }
+        }
+
+        // --- Poll for Trellis2 completion ---
+        function startPolling() {
+            if (pollTimer) clearInterval(pollTimer);
+            pollTimer = setInterval(pollStatus, 3000);
+        }
+
+        async function pollStatus() {
+            if (!itemId) return;
+
+            try {
+                const res = await fetch(`/api/capture/${itemId}/status`);
+                const data = await res.json();
+
+                if (!data.success) return;
+
+                const statusEl = document.getElementById('recon-status');
+
+                if (data.status === 'reconstructed' && data.asset_url) {
+                    clearInterval(pollTimer);
+                    pollTimer = null;
+                    show3DPreview(data.asset_url);
+                } else if (data.status === 'ready' && data.asset_url) {
+                    // Already approved (edge case)
+                    clearInterval(pollTimer);
+                    pollTimer = null;
+                    show3DPreview(data.asset_url);
+                } else if (data.error) {
+                    clearInterval(pollTimer);
+                    pollTimer = null;
+                    statusEl.textContent = 'Error: ' + data.error;
+                    statusEl.style.color = '#e53935';
+                } else {
+                    statusEl.textContent = 'Status: ' + data.status + '...';
+                }
+            } catch (e) {
+                console.error('Poll error:', e);
+            }
+        }
+
+        function show3DPreview(assetUrl) {
+            const viewer = document.getElementById('model-viewer');
+            viewer.src = assetUrl;
+            setState('preview');
+        }
+
+        // --- Approve / Reject ---
+        async function approveItem() {
+            const btn = document.getElementById('approve-btn');
+            btn.disabled = true;
+            btn.textContent = 'Encoding...';
+
+            try {
+                const res = await fetch(`/api/capture/${itemId}/approve`, { method: 'POST' });
+                const data = await res.json();
+
+                if (!data.success) {
+                    alert('Approve error: ' + data.error);
+                    btn.disabled = false;
+                    btn.textContent = 'Add to Library';
+                    return;
+                }
+
+                setState('done');
+            } catch (e) {
+                console.error('Approve error:', e);
+                alert('Failed: ' + e.message);
+                btn.disabled = false;
+                btn.textContent = 'Add to Library';
+            }
+        }
+
+        async function rejectItem() {
+            try {
+                await fetch(`/api/capture/${itemId}/reject`, { method: 'POST' });
+            } catch (e) {
+                console.error('Reject error:', e);
+            }
+            startOver();
+        }
+
+        function startOver() {
+            if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+            itemId = null;
+            image = null;
+            maskImage = null;
+            points = [];
+            predicting = false;
+            objectName = '';
+            document.getElementById('description-input').value = '';
+            document.getElementById('reconstruct-btn').disabled = false;
+            document.getElementById('approve-btn').disabled = false;
+            document.getElementById('approve-btn').textContent = 'Add to Library';
+            document.getElementById('model-viewer').src = '';
+            setState('capture');
+        }
+    </script>
+</body>
+</html>

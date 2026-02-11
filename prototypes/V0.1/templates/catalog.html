@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Object Catalog</title>
+    <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.4.0/model-viewer.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body {
+            height: 100%;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1e1e1e;
+            color: #ccc;
+        }
+
+        body {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .toolbar {
+            background: #2d2d2d;
+            border-bottom: 1px solid #404040;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            padding: 8px 16px;
+            gap: 8px 12px;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .toolbar h1 {
+            font-size: 16px;
+            font-weight: 500;
+            color: #fff;
+        }
+
+        .toolbar-spacer { flex: 1; }
+
+        .toolbar-buttons {
+            display: flex;
+            gap: 6px;
+        }
+
+        .toolbar button, .toolbar a.btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            font-size: 13px;
+            cursor: pointer;
+            transition: background 0.15s;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+        }
+
+        .toolbar .btn-primary {
+            background: #0e639c;
+            color: white;
+        }
+
+        .toolbar .btn-primary:hover { background: #1177bb; }
+
+        .toolbar .btn-secondary {
+            background: #3c3c3c;
+            color: #ccc;
+        }
+
+        .toolbar .btn-secondary:hover { background: #4c4c4c; }
+
+        .filter-tabs {
+            display: flex;
+            gap: 4px;
+            background: #252525;
+            padding: 4px;
+            border-radius: 6px;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            flex-shrink: 0;
+            width: 100%;
+        }
+
+        .filter-tabs button {
+            padding: 6px 12px;
+            background: transparent;
+            border: none;
+            border-radius: 4px;
+            color: #888;
+            font-size: 12px;
+            cursor: pointer;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+
+        .filter-tabs button:hover { background: #3c3c3c; color: #ccc; }
+        .filter-tabs button.active { background: #0e639c; color: white; }
+
+        .stats {
+            font-size: 12px;
+            color: #888;
+            display: flex;
+            gap: 8px 16px;
+            flex-wrap: wrap;
+        }
+
+        .stats .count { font-weight: 600; color: #ccc; }
+
+        .content {
+            padding: 16px;
+            overflow-y: auto;
+            flex: 1;
+            min-height: 0;
+        }
+
+        .items-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 12px;
+        }
+
+        .item-card {
+            background: #252525;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 2px solid transparent;
+            transition: border-color 0.15s;
+        }
+
+        .item-card.ready { border-color: #4caf50; }
+        .item-card.needs_3d, .item-card.needs_embedding { border-color: #ff9800; }
+        .item-card.failed { border-color: #f44336; opacity: 0.7; }
+
+        .item-card img {
+            width: 100%;
+            aspect-ratio: 1;
+            object-fit: cover;
+            cursor: pointer;
+            display: block;
+        }
+
+        .item-card img:hover { opacity: 0.9; }
+
+        .item-card .no-image {
+            width: 100%;
+            aspect-ratio: 1;
+            background: #333;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #666;
+            font-size: 13px;
+        }
+
+        .item-info {
+            padding: 8px 10px;
+        }
+
+        .item-info .description {
+            font-size: 13px;
+            color: #ddd;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            margin-bottom: 4px;
+        }
+
+        .item-info .meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 11px;
+            color: #888;
+        }
+
+        .status-badge {
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+            text-transform: uppercase;
+        }
+
+        .status-badge.ready { background: #4caf50; color: #fff; }
+        .status-badge.review { background: #2196f3; color: #fff; }
+        .status-badge.needs_3d, .status-badge.needs_embedding { background: #ff9800; color: #000; }
+        .status-badge.needs_masking { background: #2196f3; color: #fff; }
+        .status-badge.failed { background: #f44336; color: #fff; }
+        .status-badge.pending { background: #9e9e9e; color: #fff; }
+
+        .item-actions {
+            padding: 6px 8px;
+            display: flex;
+            gap: 6px;
+            border-top: 1px solid #333;
+        }
+
+        .item-actions button, .item-actions a {
+            flex: 1;
+            padding: 6px 8px;
+            border: none;
+            border-radius: 4px;
+            font-size: 13px;
+            cursor: pointer;
+            text-align: center;
+            text-decoration: none;
+            transition: background 0.15s;
+        }
+
+        .item-actions .view-3d { background: #0e639c; color: white; }
+        .item-actions .view-3d:hover { background: #1177bb; }
+        .item-actions .download { background: #3c3c3c; color: #ccc; }
+        .item-actions .download:hover { background: #4c4c4c; }
+        .item-actions .delete { background: #c62828; color: white; }
+        .item-actions .delete:hover { background: #e53935; }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #666;
+        }
+
+        .empty-state h2 { font-size: 18px; margin-bottom: 8px; color: #888; }
+
+        /* Lightbox */
+        .lightbox {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.9);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .lightbox.active { display: flex; }
+        .lightbox img { max-width: 90%; max-height: 90%; object-fit: contain; }
+        .lightbox-close {
+            position: absolute; top: 20px; right: 20px;
+            background: none; border: none; color: white; font-size: 32px; cursor: pointer;
+        }
+
+        /* 3D Viewer Modal */
+        .viewer-modal {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.9);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .viewer-modal.active { display: flex; }
+
+        .viewer-container {
+            width: 80%;
+            height: 80%;
+            background: #1e1e1e;
+            border-radius: 8px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .viewer-close {
+            position: absolute; top: 10px; right: 10px;
+            background: rgba(0,0,0,0.5); border: none; color: white;
+            font-size: 24px; width: 40px; height: 40px; border-radius: 50%;
+            cursor: pointer; z-index: 10;
+        }
+
+        .viewer-close:hover { background: rgba(0,0,0,0.7); }
+
+        .viewer-container model-viewer {
+            width: 100%;
+            height: 100%;
+            --poster-color: #1e1e1e;
+        }
+
+        /* Search */
+        .search-bar {
+            width: 100%;
+            display: flex;
+            gap: 8px;
+        }
+
+        .search-bar input {
+            flex: 1;
+            background: #3c3c3c;
+            border: 1px solid #555;
+            border-radius: 4px;
+            padding: 6px 10px;
+            color: #fff;
+            font-size: 13px;
+        }
+
+        .search-bar input:focus { outline: none; border-color: #0e639c; }
+
+        .search-bar button {
+            padding: 6px 12px;
+            background: #0e639c;
+            border: none;
+            border-radius: 4px;
+            color: white;
+            font-size: 13px;
+            cursor: pointer;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .toolbar { padding: 8px 12px; gap: 6px 8px; }
+            .toolbar h1 { font-size: 14px; }
+            .toolbar-spacer { display: none; }
+            .content { padding: 8px; }
+            .items-grid {
+                grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+                gap: 8px;
+            }
+            .viewer-container { width: 95%; height: 90%; }
+        }
+
+        @media (max-width: 480px) {
+            .items-grid {
+                grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+                gap: 6px;
+            }
+            .item-info { padding: 6px 8px; }
+            .item-info .description { font-size: 12px; }
+            .item-actions button, .item-actions a { padding: 8px 4px; font-size: 14px; }
+            .viewer-container { width: 100%; height: 100%; border-radius: 0; }
+        }
+    </style>
+</head>
+<body>
+    <div class="toolbar">
+        <h1>Catalog</h1>
+        <div class="toolbar-spacer"></div>
+        <div class="toolbar-buttons">
+            <a href="/capture" class="btn btn-primary">+ Capture</a>
+            <button class="btn-secondary" onclick="refreshData()">Refresh</button>
+        </div>
+
+        <div class="filter-tabs">
+            <button class="active" data-status="">All</button>
+            <button data-status="ready">Ready</button>
+            <button data-status="review">Review</button>
+            <button data-status="processing">Processing</button>
+            <button data-status="needs_masking">Masking</button>
+            <button data-status="failed">Failed</button>
+        </div>
+
+        <div class="stats" id="stats"></div>
+
+        <div class="search-bar">
+            <input type="text" id="search-input" placeholder="Search catalog..." onkeydown="if(event.key==='Enter')searchCatalog()">
+            <button onclick="searchCatalog()">Search</button>
+        </div>
+    </div>
+
+    <div class="content" id="content">
+        <div class="empty-state"><h2>Loading...</h2></div>
+    </div>
+
+    <!-- Lightbox -->
+    <div class="lightbox" id="lightbox" onclick="closeLightbox()">
+        <button class="lightbox-close">&times;</button>
+        <img id="lightbox-img" src="" alt="Full size">
+    </div>
+
+    <!-- 3D Viewer Modal -->
+    <div class="viewer-modal" id="viewer-modal" onclick="closeViewer(event)">
+        <div class="viewer-container" onclick="event.stopPropagation()">
+            <button class="viewer-close" onclick="closeViewer()">&times;</button>
+            <model-viewer id="model-viewer"
+                camera-controls
+                touch-action="pan-y"
+                auto-rotate
+                shadow-intensity="1"
+                environment-image="neutral"
+                exposure="2.0"
+            ></model-viewer>
+            <div style="position: absolute; top: 10px; left: 10px; z-index: 10; display: flex; gap: 6px;">
+                <select id="viewer-lighting-preset" onchange="applyViewerLighting(this.value)" style="
+                    background: rgba(30,30,30,0.85);
+                    color: #eee;
+                    border: 1px solid #555;
+                    border-radius: 4px;
+                    padding: 5px 8px;
+                    font-size: 13px;
+                    cursor: pointer;
+                ">
+                    <option value="studio">Studio</option>
+                    <option value="bright">Bright</option>
+                    <option value="outdoor">Outdoor</option>
+                    <option value="soft">Soft</option>
+                    <option value="dramatic">Dramatic</option>
+                    <option value="flat">Flat</option>
+                </select>
+                <select id="viewer-background" onchange="applyViewerBackground(this.value)" style="
+                    background: rgba(30,30,30,0.85);
+                    color: #eee;
+                    border: 1px solid #555;
+                    border-radius: 4px;
+                    padding: 5px 8px;
+                    font-size: 13px;
+                    cursor: pointer;
+                ">
+                    <option value="">No Background</option>
+                </select>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentStatus = '';
+        let searchMode = false;
+
+        document.addEventListener('DOMContentLoaded', () => {
+            loadStats();
+            loadItems();
+
+            document.querySelectorAll('.filter-tabs button').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    document.querySelectorAll('.filter-tabs button').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    currentStatus = btn.dataset.status;
+                    searchMode = false;
+                    document.getElementById('search-input').value = '';
+                    loadItems();
+                });
+            });
+        });
+
+        async function loadStats() {
+            try {
+                const res = await fetch(`/api/catalog/stats?_=${Date.now()}`);
+                const data = await res.json();
+                if (!data.success) return;
+
+                const el = document.getElementById('stats');
+                const parts = [];
+                if (data.ready) parts.push(`<span class="count" style="color:#4caf50">${data.ready}</span> ready`);
+                if (data.review) parts.push(`<span class="count" style="color:#2196f3">${data.review}</span> review`);
+                const processing = (data.approved || 0) + (data.needs_3d || 0) + (data.needs_embedding || 0);
+                if (processing) parts.push(`<span class="count" style="color:#ff9800">${processing}</span> processing`);
+                if (data.needs_masking) parts.push(`<span class="count" style="color:#2196f3">${data.needs_masking}</span> masking`);
+                if (data.failed) parts.push(`<span class="count" style="color:#f44336">${data.failed}</span> failed`);
+                el.innerHTML = parts.join(' &middot; ');
+            } catch (e) {
+                console.error('Stats error:', e);
+            }
+        }
+
+        async function loadItems() {
+            const content = document.getElementById('content');
+            content.innerHTML = '<div class="empty-state"><h2>Loading...</h2></div>';
+
+            try {
+                let url = `/api/catalog/items?_=${Date.now()}`;
+                if (currentStatus) url += `&status=${currentStatus}`;
+
+                const res = await fetch(url);
+                const data = await res.json();
+
+                if (!data.success) {
+                    content.innerHTML = `<div class="empty-state"><h2>Error: ${data.error}</h2></div>`;
+                    return;
+                }
+
+                if (data.items.length === 0) {
+                    content.innerHTML = `<div class="empty-state"><h2>No items</h2><p><a href="/capture" style="color:#0e639c">Capture your first object</a></p></div>`;
+                    return;
+                }
+
+                content.innerHTML = '<div class="items-grid">' + data.items.map(renderItem).join('') + '</div>';
+
+            } catch (e) {
+                console.error('Load error:', e);
+                content.innerHTML = '<div class="empty-state"><h2>Failed to load</h2></div>';
+            }
+        }
+
+        function renderItem(item) {
+            const imgSrc = item.image_path || item.original_image_path || '';
+            const hasImage = !!imgSrc;
+            const assetSrc = item.asset_path || '';
+            const hasAsset = !!assetSrc;
+            const status = item.status || 'unknown';
+            const desc = item.description || 'No description';
+
+            return `
+                <div class="item-card ${status}">
+                    ${hasImage
+                        ? `<img src="${imgSrc}" onclick="showLightbox('${imgSrc}')" alt="${escapeAttr(desc)}">`
+                        : '<div class="no-image">No image</div>'}
+                    <div class="item-info">
+                        <div class="description" title="${escapeAttr(desc)}">${escapeHtml(desc)}</div>
+                        <div class="meta">
+                            <span>${item.source || 'library'}</span>
+                            <span class="status-badge ${status}">${status.replace(/_/g, ' ')}</span>
+                        </div>
+                    </div>
+                    <div class="item-actions">
+                        ${hasAsset ? `
+                            <button class="view-3d" onclick="view3D('${assetSrc}')">3D</button>
+                            <a href="${assetSrc}" download class="download">DL</a>
+                        ` : ''}
+                        <button class="delete" onclick="deleteItem('${item._id}')">Del</button>
+                    </div>
+                </div>
+            `;
+        }
+
+        async function searchCatalog() {
+            const query = document.getElementById('search-input').value.trim();
+            if (!query) { searchMode = false; loadItems(); return; }
+
+            const content = document.getElementById('content');
+            content.innerHTML = '<div class="empty-state"><h2>Searching...</h2></div>';
+            searchMode = true;
+
+            // Deselect filter tabs
+            document.querySelectorAll('.filter-tabs button').forEach(b => b.classList.remove('active'));
+
+            try {
+                const res = await fetch('/api/libraries/search', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query, mode: 'vector', limit: 50 })
+                });
+                const data = await res.json();
+
+                if (!data.success) {
+                    content.innerHTML = `<div class="empty-state"><h2>Search failed: ${data.error}</h2></div>`;
+                    return;
+                }
+
+                if (!data.results || data.results.length === 0) {
+                    content.innerHTML = '<div class="empty-state"><h2>No results</h2></div>';
+                    return;
+                }
+
+                // Normalize results to match catalog item format
+                const items = data.results.map(r => ({
+                    ...r,
+                    _id: r._id || r.id,
+                    image_path: r.image_path ? (r.image_path.startsWith('/') ? r.image_path : '/' + r.image_path) : null,
+                    asset_path: r.asset_path ? (r.asset_path.startsWith('/') ? r.asset_path : '/' + r.asset_path) : null,
+                }));
+
+                content.innerHTML = '<div class="items-grid">' + items.map(renderItem).join('') + '</div>';
+
+            } catch (e) {
+                console.error('Search error:', e);
+                content.innerHTML = '<div class="empty-state"><h2>Search failed</h2></div>';
+            }
+        }
+
+        async function deleteItem(itemId) {
+            if (!confirm('Delete this item?')) return;
+            try {
+                const res = await fetch(`/api/capture/${itemId}/reject`, { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    refreshData();
+                } else {
+                    alert('Delete failed: ' + data.error);
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            }
+        }
+
+        const viewerLightingPresets = {
+            studio:   { exposure: 2.0, shadowIntensity: 1.0, env: 'neutral' },
+            bright:   { exposure: 3.0, shadowIntensity: 0.5, env: 'neutral' },
+            outdoor:  { exposure: 2.2, shadowIntensity: 1.5, env: 'legacy' },
+            soft:     { exposure: 2.5, shadowIntensity: 0.3, env: 'neutral' },
+            dramatic: { exposure: 1.5, shadowIntensity: 2.0, env: 'neutral' },
+            flat:     { exposure: 3.0, shadowIntensity: 0.0, env: 'neutral' },
+        };
+
+        function applyViewerLighting(name) {
+            const preset = viewerLightingPresets[name];
+            if (!preset) return;
+            const viewer = document.getElementById('model-viewer');
+            // Set both attributes and properties for mobile compatibility
+            viewer.setAttribute('exposure', preset.exposure);
+            viewer.setAttribute('shadow-intensity', preset.shadowIntensity);
+            viewer.exposure = preset.exposure;
+            viewer.shadowIntensity = preset.shadowIntensity;
+            const bgSelect = document.getElementById('viewer-background');
+            if (!bgSelect || !bgSelect.value) {
+                viewer.setAttribute('environment-image', preset.env);
+                viewer.environmentImage = preset.env;
+            }
+        }
+
+        function applyViewerBackground(value) {
+            const viewer = document.getElementById('model-viewer');
+            const preset = viewerLightingPresets[document.getElementById('viewer-lighting-preset').value];
+            if (value) {
+                // Panorama as visual backdrop only; lighting stays on the preset
+                viewer.skyboxImage = value;
+                viewer.environmentImage = preset ? preset.env : 'neutral';
+            } else {
+                viewer.skyboxImage = null;
+                viewer.environmentImage = preset ? preset.env : 'neutral';
+            }
+        }
+
+        (async function loadEnvironments() {
+            // Skip panorama backgrounds on mobile — large textures crash WebGL
+            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+            if (isMobile) {
+                const select = document.getElementById('viewer-background');
+                if (select) select.style.display = 'none';
+                return;
+            }
+            try {
+                const resp = await fetch('/api/environments');
+                if (!resp.ok) return;
+                const envs = await resp.json();
+                const select = document.getElementById('viewer-background');
+                for (const env of envs) {
+                    const opt = document.createElement('option');
+                    opt.value = env.url;
+                    opt.textContent = env.name;
+                    select.appendChild(opt);
+                }
+            } catch(e) {
+                console.warn('Could not load environments:', e);
+            }
+        })();
+
+        function view3D(assetPath) {
+            const viewer = document.getElementById('model-viewer');
+            const presetSelect = document.getElementById('viewer-lighting-preset');
+            viewer.src = assetPath;
+            applyViewerLighting(presetSelect.value);
+            document.getElementById('viewer-modal').classList.add('active');
+            // Re-apply lighting after model loads (mobile timing fix)
+            viewer.addEventListener('load', function onLoad() {
+                viewer.removeEventListener('load', onLoad);
+                applyViewerLighting(presetSelect.value);
+            });
+        }
+
+        function closeViewer(event) {
+            if (event && event.target !== document.getElementById('viewer-modal')) return;
+            document.getElementById('viewer-modal').classList.remove('active');
+            document.getElementById('model-viewer').src = '';
+        }
+
+        function showLightbox(src) {
+            document.getElementById('lightbox-img').src = src;
+            document.getElementById('lightbox').classList.add('active');
+        }
+
+        function closeLightbox() {
+            document.getElementById('lightbox').classList.remove('active');
+        }
+
+        function refreshData() {
+            loadStats();
+            if (!searchMode) loadItems();
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function escapeAttr(text) {
+            return text.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') { closeLightbox(); closeViewer(); }
+        });
+    </script>
+</body>
+</html>

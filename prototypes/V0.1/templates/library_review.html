@@ -1244,14 +1244,14 @@
         // --- Background / Environment panoramas ---
         function applyViewerBackground(value) {
             const viewer = document.getElementById('model-viewer');
+            const preset = viewerLightingPresets[document.getElementById('viewer-lighting-preset').value];
             if (value) {
-                viewer.setAttribute('skybox-image', value);
-                viewer.setAttribute('environment-image', value);
+                // Panorama as visual backdrop only; lighting stays on the preset
+                viewer.skyboxImage = value;
+                viewer.environmentImage = preset ? preset.env : 'neutral';
             } else {
-                viewer.removeAttribute('skybox-image');
-                // Restore lighting preset's env setting
-                const preset = viewerLightingPresets[document.getElementById('viewer-lighting-preset').value];
-                viewer.setAttribute('environment-image', preset ? preset.env : 'neutral');
+                viewer.skyboxImage = null;
+                viewer.environmentImage = preset ? preset.env : 'neutral';
             }
         }
 

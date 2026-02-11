@@ -81,7 +81,9 @@ Terminal 3: Trellis2 Worker (trellis2 env)
 
 **Services (`services/`):**
 - `orchestrator.py` - SD3.5 image generation, VRAM management
-- `ollama_client.py` - LLM/VLM integration, supports vision models (qwen2-vl) for image analysis
+- `ollama_client.py` - LLM/VLM integration, supports vision models (qwen3-vl) for image analysis
+- `vlm_service.py` - VLM object description and identification (uses Ollama qwen3-vl)
+- `sam_service.py` - SAM3 text-prompted segmentation + point refinement + compositing
 - `scene_parser.py` - Scene/SceneNode dataclasses, bidirectional text↔scene conversion
 - `database.py` - MongoDB collections for scenes, jobs, assets, libraries
 
@@ -110,6 +112,7 @@ Terminal 3: Trellis2 Worker (trellis2 env)
 
 **External Repos (integrated via sys.path):**
 - `sd3.5/` - SD3.5 inference (`SD3Inferencer` class)
+- `sam3/` - Meta SAM 3 text-prompted segmentation (`Sam3Processor`, `build_sam3_image_model`)
 - `TRELLIS.2/` - Trellis2 image-to-3D pipeline (runs in separate conda env)
 
 ## Environment Variables
@@ -126,6 +129,10 @@ OLLAMA_MODEL=qwen3-vl:8b
 # SD3.5 (image generation)
 SD35_REPO_PATH=c:/Users/david/Documents/GitHub/sd3.5
 SD35_MODEL=sd3.5_medium.safetensors
+
+# SAM3 (Meta SAM 3, text-prompted segmentation)
+SAM3_REPO_PATH=c:/Users/david/Documents/GitHub/sam3
+SAM3_AUTO_UNLOAD_SECONDS=120
 
 # Trellis2 (3D mesh generation, runs in separate conda env)
 TRELLIS2_REPO_PATH=/mnt/g/GitHub/TRELLIS.2
@@ -190,6 +197,35 @@ Text list → SD3.5 (3 variants) → Human review → Trellis2 (GLB mesh) → CL
 - Text embedding: from description
 - Image embedding: from SD3.5 output image
 - Supports FAISS index or local brute-force fallback
+
+## Capture Flow (Phone-First)
+
+Capture real objects via phone camera → auto-describe → auto-mask → reconstruct 3D → library.
+
+**Pipeline:**
+```
+Photo → VLM (qwen3-vl: describe + identify object) → SAM3 (text-prompted mask) → User review/refine → Composite on white → Trellis2 (GLB) → CLIP encode → Library
+```
+
+**Capture state machine:**
+```
+[upload] → review → needs_3d → reconstructed → ready
+                        ↓
+                     rejected (deleted)
+```
+
+**Endpoints:**
+- `POST /api/capture/upload` - Upload photo, auto-describe (VLM), auto-mask (SAM3 text prompt)
+- `POST /api/capture/refine-mask` - Refine mask with user touch points (SAM3 geometric prompts)
+- `POST /api/capture/reconstruct` - Composite on white, send to Trellis2
+- `GET /api/capture/<id>/status` - Poll for Trellis2 completion
+- `POST /api/capture/<id>/approve` - CLIP encode, add to library
+- `POST /api/capture/<id>/reject` - Delete item and files
+
+**SAM3 API (services/sam_service.py):**
+- `predict_text(item_id, image_path, text_prompt)` - Text-prompted segmentation
+- `predict_point(item_id, image_path, points, text_prompt)` - Geometric refinement with optional text
+- `composite_on_white(image_path, mask)` - Extract object onto white background
 
 ## Media Files
 

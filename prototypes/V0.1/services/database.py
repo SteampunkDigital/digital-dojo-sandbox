@@ -486,6 +486,38 @@ class DatabaseService:
         logger.info(f"Added uploaded item to library {library_id}: {description[:50]}")
         return item["_id"]
 
+    def add_capture_item(self, description: str, original_image_path: str) -> str:
+        """
+        Create a library item from a phone capture (no library_id needed).
+
+        Returns:
+            Item ID
+        """
+        import uuid
+
+        item = {
+            "_id": uuid.uuid4().hex,
+            "library_id": None,
+            "description": description,
+            "variant_group_id": None,
+            "variant_index": 0,
+            "seed": 0,
+            "source": "capture",
+            "original_image_path": original_image_path,
+            "image_path": original_image_path,
+            "asset_path": None,
+            "asset_type": None,
+            "text_embedding": None,
+            "image_embedding": None,
+            "status": "review",
+            "error": None,
+            "created_at": datetime.utcnow()
+        }
+        self.library_items.insert_one(item)
+
+        logger.info(f"Added capture item: {description[:50]}")
+        return item["_id"]
+
     def get_library(self, library_id: str) -> Optional[Dict[str, Any]]:
         """Get a library by ID"""
         return self.libraries.find_one({"_id": library_id})
@@ -837,12 +869,13 @@ class DatabaseService:
 
         return result.deleted_count
 
-    def get_library_stats(self, library_id: str) -> Dict[str, int]:
-        """Get count of items at each status for a library."""
+    def get_library_stats(self, library_id: str = None) -> Dict[str, int]:
+        """Get count of items at each status. If library_id is None, counts all items."""
         pipeline = [
-            {"$match": {"library_id": library_id}},
             {"$group": {"_id": "$status", "count": {"$sum": 1}}}
         ]
+        if library_id:
+            pipeline.insert(0, {"$match": {"library_id": library_id}})
         results = list(self.library_items.aggregate(pipeline))
         stats = {r["_id"]: r["count"] for r in results}
 

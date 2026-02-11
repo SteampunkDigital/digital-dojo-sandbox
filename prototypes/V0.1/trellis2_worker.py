@@ -2,30 +2,24 @@
 Trellis2 worker - runs in the trellis2 conda environment.
 Polls MongoDB for needs_3d items and generates GLB meshes.
 
-Trellis2 has a slow memory leak, so use --max-items to restart periodically.
-Wrap in a loop for continuous processing:
-    while true; do python trellis2_worker.py --max-items 10; sleep 2; done
+Architecture: lightweight supervisor spawns a fresh subprocess for each batch.
+This gives true memory isolation — when the child exits, ALL GPU/CPU memory
+is reclaimed by the OS. No more OOM kills from accumulated PyTorch state.
 
 Usage:
     conda activate trellis2
-    python trellis2_worker.py                  # Process 10 items and exit (default)
-    python trellis2_worker.py --max-items 20   # Process 20 items and exit
-    python trellis2_worker.py --max-items 0    # No limit (not recommended)
-    python trellis2_worker.py --once           # Process available items (up to limit) and exit
+    python trellis2_worker.py              # Supervisor: polls and spawns children
+    python trellis2_worker.py --once       # Process one batch and exit
+    python trellis2_worker.py --batch      # (internal) Child process: do GPU work
 """
 import os
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-
 import sys
 import time
-import uuid
 import argparse
 import logging
+import subprocess as sp
 from datetime import datetime, timezone
-from pathlib import Path
 
-import torch
-from PIL import Image
 from pymongo import MongoClient
 from dotenv import load_dotenv
 
@@ -39,12 +33,10 @@ TRELLIS2_MODEL = os.getenv('TRELLIS2_MODEL', 'microsoft/TRELLIS.2-4B')
 TRELLIS2_PIPELINE_TYPE = os.getenv('TRELLIS2_PIPELINE_TYPE', '1024_cascade')
 TRELLIS2_DECIMATION = int(os.getenv('TRELLIS2_DECIMATION', '200000'))
 TRELLIS2_TEXTURE_SIZE = int(os.getenv('TRELLIS2_TEXTURE_SIZE', '2048'))
+TRELLIS2_ALPHA_CUTOFF = float(os.getenv('TRELLIS2_ALPHA_CUTOFF', '0.5'))
 OUTPUT_DIR = os.getenv('OUTPUT_DIR', os.path.join(os.path.dirname(__file__), 'media', 'generated'))
 POLL_INTERVAL = int(os.getenv('TRELLIS2_POLL_INTERVAL', '10'))
-MAX_ITEMS = int(os.getenv('TRELLIS2_MAX_ITEMS', '10'))
-
-# Add Trellis2 to path
-sys.path.insert(0, TRELLIS2_REPO_PATH)
+BATCH_SIZE = int(os.getenv('TRELLIS2_BATCH_SIZE', '5'))
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,25 +56,171 @@ def get_db():
     return client[MONGODB_DATABASE]
 
 
-def get_pending_items(db, batch_size: int):
-    """Get all items needing 3D generation from both collections."""
+def has_pending_items(db) -> bool:
+    """Check if there are items needing 3D generation (lightweight query)."""
+    if db.library_items.find_one({'status': 'needs_3d'}, {'_id': 1}):
+        return True
+    if db.jobs.find_one({'status': 'needs_3d'}, {'_id': 1}):
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Supervisor: lightweight loop that spawns child processes
+# ---------------------------------------------------------------------------
+
+def run_supervisor(once: bool = False):
+    """
+    Supervisor loop. Never imports torch/trellis2 — stays tiny in memory.
+    Spawns a fresh child process for each batch of GPU work.
+    """
+    db = get_db()
+
+    logger.info("Trellis2 supervisor started")
+    logger.info(f"MongoDB: {MONGODB_URI}/{MONGODB_DATABASE}")
+    logger.info(f"Output dir: {OUTPUT_DIR}")
+    logger.info(f"Batch size: {BATCH_SIZE}")
+
+    try:
+        while True:
+            if not has_pending_items(db):
+                if once:
+                    logger.info("No items to process, exiting (--once mode)")
+                    break
+                time.sleep(POLL_INTERVAL)
+                continue
+
+            # Spawn a child process to handle the batch
+            logger.info("Work found, spawning batch subprocess...")
+            child = sp.Popen(
+                [sys.executable, __file__, '--batch', '--batch-size', str(BATCH_SIZE)],
+                stdout=sys.stdout,
+                stderr=sys.stderr,
+            )
+            child.wait()
+
+            if child.returncode != 0:
+                logger.warning(f"Batch subprocess exited with code {child.returncode}")
+                # Back off on failure to avoid tight crash loops
+                time.sleep(POLL_INTERVAL)
+            else:
+                logger.info("Batch subprocess completed successfully")
+
+            if once:
+                break
+
+            # Brief pause before checking for more work
+            time.sleep(2)
+
+    except KeyboardInterrupt:
+        logger.info("Supervisor interrupted")
+
+
+# ---------------------------------------------------------------------------
+# Batch child: does the actual GPU work, then exits
+# ---------------------------------------------------------------------------
+
+def run_batch(batch_size: int):
+    """
+    Child process: acquire GPU lock, load pipeline, process items, exit.
+    When this process exits, ALL GPU/CPU memory is reclaimed by the OS.
+    """
+    # Heavy imports only in the child process
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    import torch
+    import uuid
+    import gc
+    from PIL import Image
+
+    sys.path.insert(0, TRELLIS2_REPO_PATH)
+
+    db = get_db()
+    gpu_lock = GPULock("trellis2_worker")
+
+    # Gather pending items
+    items = _get_pending_items(db, batch_size)
+    if not items:
+        logger.info("No items to process in batch")
+        return
+
+    logger.info(f"Batch: {len(items)} items to process")
+
+    # Acquire GPU lock
+    logger.info("Acquiring GPU lock...")
+    if not gpu_lock.acquire(timeout=-1):
+        logger.error("Failed to acquire GPU lock")
+        return
+
+    pipeline = None
+    processed = 0
+
+    try:
+        # Load pipeline
+        logger.info(f"Loading Trellis2 pipeline: {TRELLIS2_MODEL}")
+        from trellis2.pipelines import Trellis2ImageTo3DPipeline
+        pipeline = Trellis2ImageTo3DPipeline.from_pretrained(TRELLIS2_MODEL)
+        pipeline.cuda()
+        logger.info("Trellis2 pipeline loaded")
+
+        for item in items:
+            if not item.get('image_path') or not os.path.exists(item['image_path']):
+                _mark_failed(db, item, f"Image not found: {item.get('image_path')}")
+                logger.warning(f"Skipping {item['id']}: image not found")
+                continue
+
+            _mark_processing(db, item)
+            gpu_lock.heartbeat()
+
+            try:
+                output_path = _generate_glb(pipeline, item['image_path'], item['seed'])
+                _mark_completed(db, item, output_path)
+                processed += 1
+                logger.info(f"Completed {item['id']}: {item['description'][:50]} ({processed} total)")
+            except Exception as e:
+                _mark_failed(db, item, str(e))
+                logger.error(f"Failed {item['id']}: {e}")
+                if "out of memory" in str(e).lower() or "CUDA" in str(e):
+                    logger.error("CUDA error, stopping batch")
+                    break
+
+            # Cleanup between items
+            torch.cuda.empty_cache()
+            gc.collect()
+
+        logger.info(f"Batch complete: {processed} items processed")
+
+    except Exception as e:
+        logger.error(f"Batch failed: {e}")
+        sys.exit(1)
+
+    finally:
+        # Release GPU lock. Pipeline cleanup happens automatically when process exits.
+        gpu_lock.release()
+        logger.info("GPU lock released, child process exiting")
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers (used by batch child)
+# ---------------------------------------------------------------------------
+
+def _get_pending_items(db, batch_size: int):
+    """Get items needing 3D generation from both collections."""
     items = []
 
-    # Library items with status 'needs_3d'
     for item in db.library_items.find(
         {'status': 'needs_3d'},
         limit=batch_size
     ).sort('created_at', 1):
+        is_capture = item.get('source') == 'capture'
         items.append({
             'collection': 'library_items',
             'id': item['_id'],
             'image_path': item.get('image_path'),
             'seed': item.get('seed', 42),
             'description': item.get('description', ''),
-            'next_status': 'needs_embedding',
+            'next_status': 'reconstructed' if is_capture else 'needs_embedding',
         })
 
-    # Scene jobs with status 'needs_3d'
     remaining = batch_size - len(items)
     if remaining > 0:
         for job in db.jobs.find(
@@ -101,8 +239,7 @@ def get_pending_items(db, batch_size: int):
     return items
 
 
-def mark_processing(db, item):
-    """Mark an item as currently being processed."""
+def _mark_processing(db, item):
     db[item['collection']].update_one(
         {'_id': item['id']},
         {'$set': {
@@ -112,15 +249,13 @@ def mark_processing(db, item):
     )
 
 
-def mark_completed(db, item, output_path: str):
-    """Mark an item as completed with output path."""
+def _mark_completed(db, item, output_path: str):
     update = {
         'status': item['next_status'],
         'asset_path': output_path,
         'asset_type': 'mesh',
         'completed_3d_at': datetime.now(timezone.utc),
     }
-    # For scene jobs, also set output_path and completed_at
     if item['collection'] == 'jobs':
         update['output_path'] = output_path
         update['completed_at'] = datetime.now(timezone.utc)
@@ -131,8 +266,7 @@ def mark_completed(db, item, output_path: str):
     )
 
 
-def mark_failed(db, item, error: str):
-    """Mark an item as failed."""
+def _mark_failed(db, item, error: str):
     db[item['collection']].update_one(
         {'_id': item['id']},
         {'$set': {
@@ -143,32 +277,21 @@ def mark_failed(db, item, error: str):
     )
 
 
-def load_pipeline():
-    """Load the Trellis2 pipeline."""
-    logger.info(f"Loading Trellis2 pipeline: {TRELLIS2_MODEL}")
-    from trellis2.pipelines import Trellis2ImageTo3DPipeline
-    pipeline = Trellis2ImageTo3DPipeline.from_pretrained(TRELLIS2_MODEL)
-    pipeline.cuda()
-    logger.info("Trellis2 pipeline loaded")
-    return pipeline
-
-
-def generate_glb(pipeline, image_path: str, seed: int) -> str:
+def _generate_glb(pipeline, image_path: str, seed: int) -> str:
     """Generate a GLB mesh from an image. Returns output path."""
+    import uuid
     import o_voxel
+    from PIL import Image
 
-    # Load image
     image = Image.open(image_path)
     logger.info(f"Generating mesh from {image_path} (seed={seed})")
 
-    # Generate mesh
     mesh = pipeline.run(
         image,
         seed=seed,
         pipeline_type=TRELLIS2_PIPELINE_TYPE,
     )[0]
 
-    # Export to GLB
     output_filename = f"mesh_{uuid.uuid4().hex[:8]}.glb"
     output_path = os.path.join(OUTPUT_DIR, output_filename)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -191,137 +314,64 @@ def generate_glb(pipeline, image_path: str, seed: int) -> str:
     glb.export(output_path)
     logger.info(f"Exported: {output_path}")
 
+    _patch_glb_alpha_mode(output_path, TRELLIS2_ALPHA_CUTOFF)
     return output_path
 
 
-def process_batch(pipeline, db, gpu_lock: GPULock, batch_size: int, max_items: int, total_processed: int) -> int:
-    """Process a batch of needs_3d items. Returns count processed."""
-    # Limit batch to remaining items allowed
-    if max_items > 0:
-        batch_size = min(batch_size, max_items - total_processed)
-        if batch_size <= 0:
-            return 0
+def _patch_glb_alpha_mode(path: str, alpha_cutoff: float = 0.5):
+    """Patch GLB BLEND → MASK for correct depth buffer behavior."""
+    import struct, json
 
-    items = get_pending_items(db, batch_size)
-    if not items:
-        return 0
+    with open(path, 'rb') as f:
+        header = f.read(12)
+        magic, version, total_len = struct.unpack('<4sII', header)
+        chunk_len = struct.unpack('<I', f.read(4))[0]
+        chunk_type = f.read(4)
+        json_bytes = f.read(chunk_len)
+        rest = f.read()
 
-    logger.info(f"Processing batch of {len(items)} items")
-    processed = 0
+    gltf = json.loads(json_bytes.decode('utf-8'))
+    patched = False
 
-    for item in items:
-        # Check max items limit
-        if max_items > 0 and (total_processed + processed) >= max_items:
-            logger.info(f"Reached max items limit ({max_items}), stopping")
-            break
+    for mat in gltf.get('materials', []):
+        if mat.get('alphaMode') == 'BLEND':
+            mat['alphaMode'] = 'MASK'
+            mat['alphaCutoff'] = alpha_cutoff
+            patched = True
 
-        if not item.get('image_path') or not os.path.exists(item['image_path']):
-            mark_failed(db, item, f"Image not found: {item.get('image_path')}")
-            logger.warning(f"Skipping {item['id']}: image not found")
-            continue
+    if not patched:
+        return
 
-        mark_processing(db, item)
-        gpu_lock.heartbeat()
+    new_json = json.dumps(gltf, separators=(',', ':')).encode('utf-8')
+    padding = (4 - len(new_json) % 4) % 4
+    new_json += b' ' * padding
 
-        try:
-            output_path = generate_glb(pipeline, item['image_path'], item['seed'])
-            mark_completed(db, item, output_path)
-            processed += 1
-            logger.info(f"Completed {item['id']}: {item['description'][:50]} ({total_processed + processed} total)")
-        except Exception as e:
-            mark_failed(db, item, str(e))
-            logger.error(f"Failed {item['id']}: {e}")
-            # On CUDA OOM, stop immediately
-            if "out of memory" in str(e).lower() or "CUDA" in str(e):
-                logger.error("CUDA error detected, stopping batch to prevent corruption")
-                break
+    with open(path, 'wb') as f:
+        new_total = 12 + 8 + len(new_json) + len(rest)
+        f.write(struct.pack('<4sII', magic, version, new_total))
+        f.write(struct.pack('<I', len(new_json)))
+        f.write(chunk_type)
+        f.write(new_json)
+        f.write(rest)
 
-        # Cleanup between items
-        torch.cuda.empty_cache()
-        import gc
-        gc.collect()
-
-    return processed
+    logger.info(f"Patched alpha mode: BLEND → MASK (cutoff={alpha_cutoff})")
 
 
-def run_worker(once: bool = False, batch_size: int = 100, max_items: int = 10):
-    """Main worker loop."""
-    db = get_db()
-    gpu_lock = GPULock("trellis2_worker")
-    pipeline = None
-    total_processed = 0
-
-    logger.info(f"Trellis2 worker started (once={once}, batch_size={batch_size}, max_items={max_items})")
-    logger.info(f"MongoDB: {MONGODB_URI}/{MONGODB_DATABASE}")
-    logger.info(f"Output dir: {OUTPUT_DIR}")
-    if max_items > 0:
-        logger.info(f"Will exit after {max_items} items (memory leak workaround)")
-
-    try:
-        while True:
-            # Check max items limit
-            if max_items > 0 and total_processed >= max_items:
-                logger.info(f"Processed {total_processed} items, exiting (max_items={max_items})")
-                break
-
-            # Check for pending work
-            items = get_pending_items(db, 1)
-            if not items:
-                if once:
-                    logger.info("No items to process, exiting (--once mode)")
-                    break
-                time.sleep(POLL_INTERVAL)
-                continue
-
-            # Acquire GPU lock
-            logger.info("Acquiring GPU lock...")
-            if not gpu_lock.acquire(timeout=-1):
-                logger.error("Failed to acquire GPU lock")
-                continue
-
-            try:
-                # Load pipeline if not loaded
-                if pipeline is None:
-                    pipeline = load_pipeline()
-
-                # Process available items
-                processed = process_batch(pipeline, db, gpu_lock, batch_size, max_items, total_processed)
-                total_processed += processed
-                logger.info(f"Batch complete: {processed} items ({total_processed} total)")
-
-            finally:
-                # Release GPU lock
-                gpu_lock.release()
-                logger.info("GPU lock released")
-
-            if once:
-                break
-
-            # Brief pause before checking for more work
-            time.sleep(2)
-
-    except KeyboardInterrupt:
-        logger.info("Worker interrupted")
-    finally:
-        # Cleanup
-        if pipeline is not None:
-            del pipeline
-            torch.cuda.empty_cache()
-        logger.info(f"Worker stopped. Processed {total_processed} items total.")
-        remaining = db.library_items.count_documents({'status': 'needs_3d'})
-        remaining += db.jobs.count_documents({'status': 'needs_3d'})
-        if remaining > 0:
-            logger.info(f"{remaining} items still need 3D generation. Restart worker to continue.")
-
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Trellis2 3D generation worker")
     parser.add_argument("--once", action="store_true",
-                        help="Process available items and exit")
-    parser.add_argument("--batch-size", type=int, default=100,
-                        help="Max items per batch")
-    parser.add_argument("--max-items", type=int, default=MAX_ITEMS,
-                        help=f"Exit after processing this many items (default: {MAX_ITEMS}, 0=unlimited)")
+                        help="Process one batch and exit")
+    parser.add_argument("--batch", action="store_true",
+                        help="(internal) Run as batch child process")
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE,
+                        help=f"Max items per batch (default: {BATCH_SIZE})")
     args = parser.parse_args()
 
-    run_worker(once=args.once, batch_size=args.batch_size, max_items=args.max_items)
+    if args.batch:
+        run_batch(batch_size=args.batch_size)
+    else:
+        run_supervisor(once=args.once)
