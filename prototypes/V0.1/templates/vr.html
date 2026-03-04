@@ -1,0 +1,796 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Digital Dojo VR</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { width: 100%; height: 100%; overflow: hidden; background: #1e1e1e; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+
+        #info {
+            position: absolute;
+            top: 12px;
+            left: 12px;
+            color: #aaa;
+            font-size: 13px;
+            z-index: 10;
+            pointer-events: none;
+        }
+        #info .title { color: #fff; font-size: 16px; font-weight: 500; margin-bottom: 4px; }
+        #info .hint { opacity: 0.7; }
+
+        /* Desktop sidebar */
+        #sidebar {
+            position: absolute;
+            top: 0;
+            right: 0;
+            width: 260px;
+            height: 100%;
+            background: #2d2d2d;
+            border-left: 1px solid #404040;
+            z-index: 20;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        #sidebar.hidden { display: none; }
+        #sidebar .sidebar-header {
+            padding: 10px 12px;
+            background: #252525;
+            border-bottom: 1px solid #404040;
+            font-size: 13px;
+            color: #fff;
+            font-weight: 500;
+        }
+        .search-box {
+            display: flex;
+            padding: 8px;
+            gap: 6px;
+            border-bottom: 1px solid #404040;
+        }
+        .search-box input {
+            flex: 1;
+            padding: 8px 10px;
+            background: #1e1e1e;
+            border: 1px solid #555;
+            border-radius: 4px;
+            color: #eee;
+            font-size: 13px;
+            outline: none;
+        }
+        .search-box input:focus { border-color: #0e639c; }
+        .search-box button {
+            padding: 8px 12px;
+            background: #0e639c;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            font-size: 13px;
+            cursor: pointer;
+        }
+        .search-box button:hover { background: #1177bb; }
+        #sidebar .sidebar-items {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            align-content: start;
+        }
+        .catalog-card {
+            background: #383838;
+            border-radius: 6px;
+            overflow: hidden;
+            cursor: pointer;
+            border: 2px solid transparent;
+            transition: border-color 0.15s;
+        }
+        .catalog-card:hover { border-color: #0e639c; }
+        .catalog-card.selected { border-color: #4caf50; }
+        .catalog-card img {
+            width: 100%;
+            aspect-ratio: 1;
+            object-fit: cover;
+            display: block;
+            background: #2a2a2a;
+        }
+        .catalog-card .label {
+            padding: 4px 6px;
+            font-size: 11px;
+            color: #bbb;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .catalog-card .similarity {
+            padding: 0 6px 4px;
+            font-size: 10px;
+            color: #888;
+        }
+        #sidebar .status-msg {
+            padding: 20px;
+            text-align: center;
+            color: #888;
+            font-size: 13px;
+        }
+
+        #vr-button {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 30;
+            padding: 12px 24px;
+            background: #0e639c;
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        #vr-button:hover { background: #1177bb; }
+        #vr-button:disabled { background: #555; cursor: default; }
+
+        #mode-indicator {
+            position: absolute;
+            bottom: 70px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 25;
+            padding: 6px 14px;
+            background: rgba(0,0,0,0.7);
+            color: #4caf50;
+            border-radius: 4px;
+            font-size: 13px;
+            display: none;
+        }
+    </style>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+        }
+    }
+    </script>
+</head>
+<body>
+    <div id="info">
+        <div class="title">Digital Dojo VR</div>
+        <div class="hint" id="hint-text">Search for objects to place in the scene</div>
+    </div>
+    <div id="mode-indicator"></div>
+    <button id="vr-button" disabled>VR Not Available</button>
+
+    <div id="sidebar">
+        <div class="sidebar-header">Object Search</div>
+        <div class="search-box">
+            <input type="text" id="search-input" placeholder="Search objects..." />
+            <button id="search-btn">Go</button>
+        </div>
+        <div class="sidebar-items" id="sidebar-items">
+            <div class="status-msg">Type a query to find objects</div>
+        </div>
+    </div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+        // ======================== Debug Log ========================
+        function log(msg) {
+            console.log('[VR]', msg);
+            document.getElementById('hint-text').textContent = msg;
+        }
+        log('Initializing scene...');
+
+        // ======================== State ========================
+        const state = {
+            mode: 'idle',
+            selectedCatalogItem: null,
+            ghostMesh: null,
+            grabbedObject: null,
+            grabOffset: new THREE.Vector3(),
+            grabDistance: 0,
+            placedObjects: [],
+            searchResults: [],
+            glbCache: {},
+            isVR: false,
+        };
+
+        // ======================== XR State ========================
+        let xrSession = null;
+        let xrRefSpace = null;
+        let xrGLLayer = null;
+        const xrControllers = [null, null]; // inputSource per hand
+        const xrControllerObjects = []; // Three.js objects for ray visualization
+
+        // ======================== Renderer ========================
+        // Use xrCompatible context — proven working from vr-test
+        const sidebarWidth = 260;
+        const canvas = document.createElement('canvas');
+        const glAttrs = { xrCompatible: true, antialias: false };
+        const gl = canvas.getContext('webgl2', glAttrs) || canvas.getContext('webgl', glAttrs);
+        log(`WebGL: ${gl.constructor.name}`);
+
+        // Three.js renderer wrapping our context — DO NOT enable renderer.xr
+        // We manage the XR session ourselves for Rift CV1 compatibility
+        const renderer = new THREE.WebGLRenderer({ canvas, context: gl });
+        renderer.setPixelRatio(1);
+        renderer.setSize(window.innerWidth - sidebarWidth, window.innerHeight);
+        renderer.setClearColor(0x1a1a2e);
+        renderer.toneMapping = THREE.NeutralToneMapping;
+        renderer.toneMappingExposure = 1.8;
+        renderer.autoClear = false;
+        // NOTE: renderer.xr is NOT enabled — we handle XR manually
+        document.body.appendChild(renderer.domElement);
+
+        canvas.addEventListener('webglcontextlost', (e) => { log('WebGL context lost'); e.preventDefault(); });
+        canvas.addEventListener('webglcontextrestored', () => log('WebGL context restored'));
+
+        // ======================== Scene ========================
+        const scene = new THREE.Scene();
+
+        // ======================== Camera ========================
+        const camera = new THREE.PerspectiveCamera(70, (window.innerWidth - sidebarWidth) / window.innerHeight, 0.01, 200);
+        camera.position.set(0, 1.6, 3);
+
+        // VR cameras (one per eye)
+        const vrCameraL = new THREE.PerspectiveCamera();
+        const vrCameraR = new THREE.PerspectiveCamera();
+
+        // ======================== Controls (desktop) ========================
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.target.set(0, 0, 0);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.1;
+        controls.minDistance = 0.5;
+        controls.maxDistance = 30;
+
+        // ======================== Lighting ========================
+        scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+        const dirLight = new THREE.DirectionalLight(0xffffff, 2.0);
+        dirLight.position.set(5, 10, 7);
+        scene.add(dirLight);
+        scene.add(new THREE.DirectionalLight(0xb0c0d0, 1.0).translateX(-3).translateY(-2).translateZ(-5));
+
+        // ======================== Ground ========================
+        const gridHelper = new THREE.GridHelper(20, 40, 0x6666aa, 0x444477);
+        scene.add(gridHelper);
+
+        const groundMesh = new THREE.Mesh(
+            new THREE.PlaneGeometry(20, 20),
+            new THREE.MeshStandardMaterial({ color: 0x222233, roughness: 0.9 })
+        );
+        groundMesh.rotation.x = -Math.PI / 2;
+        groundMesh.name = 'ground';
+        scene.add(groundMesh);
+
+        // ======================== Debug Landmarks ========================
+        [[0, 0.075, -2, 0xff0000], [-1, 0.075, -2, 0x00ff00], [1, 0.075, -2, 0x0000ff], [0, 1.0, -3, 0xffff00]].forEach(([x, y, z, c]) => {
+            const m = new THREE.Mesh(
+                new THREE.BoxGeometry(0.15, 0.15, 0.15),
+                new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: 0.3 })
+            );
+            m.position.set(x, y, z);
+            scene.add(m);
+        });
+
+        // ======================== Controller Rays (VR) ========================
+        for (let i = 0; i < 2; i++) {
+            const rayGeo = new THREE.BufferGeometry().setFromPoints([
+                new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -5)
+            ]);
+            const ray = new THREE.Line(rayGeo, new THREE.LineBasicMaterial({ color: 0x4488ff }));
+            ray.visible = false;
+            ray.name = 'controllerRay';
+            scene.add(ray);
+            xrControllerObjects.push(ray);
+        }
+
+        // ======================== GLB Loader ========================
+        const gltfLoader = new GLTFLoader();
+
+        async function loadGLB(url) {
+            if (state.glbCache[url]) return state.glbCache[url].clone();
+            return new Promise((resolve, reject) => {
+                gltfLoader.load(url, (gltf) => {
+                    state.glbCache[url] = gltf.scene;
+                    resolve(gltf.scene.clone());
+                }, undefined, reject);
+            });
+        }
+
+        function makeGhost(model) {
+            const ghost = model.clone();
+            ghost.traverse(child => {
+                if (child.isMesh) {
+                    child.material = child.material.clone();
+                    child.material.transparent = true;
+                    child.material.opacity = 0.4;
+                    child.material.depthWrite = false;
+                }
+            });
+            return ghost;
+        }
+
+        function normalizeModel(model) {
+            const box = new THREE.Box3().setFromObject(model);
+            const center = box.getCenter(new THREE.Vector3());
+            const size = box.getSize(new THREE.Vector3());
+            const maxDim = Math.max(size.x, size.y, size.z);
+            model.position.sub(center);
+            model.position.y += size.y / 2;
+            const wrapper = new THREE.Group();
+            wrapper.add(model);
+            if (maxDim > 0) {
+                const s = Math.min(Math.max(maxDim, 0.3), 1.0) / maxDim;
+                wrapper.scale.setScalar(s);
+            }
+            return wrapper;
+        }
+
+        // ======================== Raycasting ========================
+        const raycaster = new THREE.Raycaster();
+        const placedGroup = new THREE.Group();
+        placedGroup.name = 'placedObjects';
+        scene.add(placedGroup);
+
+        function findPlacedObjectHit(rc) {
+            if (placedGroup.children.length === 0) return null;
+            const hits = rc.intersectObjects(placedGroup.children, true);
+            if (hits.length === 0) return null;
+            let obj = hits[0].object;
+            while (obj.parent && obj.parent !== placedGroup) obj = obj.parent;
+            return { object: obj, point: hits[0].point };
+        }
+
+        function findGroundHit(rc) {
+            const hits = rc.intersectObject(groundMesh);
+            return hits.length > 0 ? hits[0].point : null;
+        }
+
+        // ======================== Hover ========================
+        let hoveredObject = null;
+        const originalMaterials = new Map();
+
+        function setHover(obj) {
+            if (hoveredObject === obj) return;
+            clearHover();
+            if (!obj) return;
+            hoveredObject = obj;
+            obj.traverse(child => {
+                if (child.isMesh) {
+                    originalMaterials.set(child, child.material);
+                    const mat = child.material.clone();
+                    mat.emissive = new THREE.Color(0x223344);
+                    mat.emissiveIntensity = 0.4;
+                    child.material = mat;
+                }
+            });
+        }
+
+        function clearHover() {
+            if (!hoveredObject) return;
+            hoveredObject.traverse(child => {
+                if (child.isMesh && originalMaterials.has(child)) {
+                    child.material.dispose();
+                    child.material = originalMaterials.get(child);
+                }
+            });
+            originalMaterials.clear();
+            hoveredObject = null;
+        }
+
+        // ======================== Actions ========================
+        async function selectCatalogItem(item) {
+            state.selectedCatalogItem = item;
+            state.mode = 'placing';
+            showModeIndicator('Placing: ' + (item.description || 'Object'));
+            log(`Loading ${item.description}...`);
+            try {
+                const model = await loadGLB(item.asset_url);
+                state.ghostMesh = makeGhost(normalizeModel(model));
+                state.ghostMesh.visible = false;
+                scene.add(state.ghostMesh);
+                log('Ready to place — click/trigger on ground');
+            } catch (e) {
+                log('Failed to load: ' + e.message);
+                cancelPlacement();
+            }
+            updateSidebarSelection(item.id);
+        }
+
+        async function placeObject(position) {
+            if (!state.selectedCatalogItem) return;
+            try {
+                const model = await loadGLB(state.selectedCatalogItem.asset_url);
+                const normalized = normalizeModel(model);
+                normalized.position.copy(position);
+                normalized.position.y = 0;
+                normalized.userData.catalogItem = state.selectedCatalogItem;
+                placedGroup.add(normalized);
+                state.placedObjects.push(normalized);
+                log(`Placed "${state.selectedCatalogItem.description}" (${state.placedObjects.length} total)`);
+            } catch (e) {
+                log('Failed: ' + e.message);
+            }
+            if (state.ghostMesh) { scene.remove(state.ghostMesh); state.ghostMesh = null; }
+            state.mode = 'idle';
+            state.selectedCatalogItem = null;
+            hideModeIndicator();
+            updateSidebarSelection(null);
+        }
+
+        function cancelPlacement() {
+            if (state.ghostMesh) { scene.remove(state.ghostMesh); state.ghostMesh = null; }
+            state.mode = 'idle';
+            state.selectedCatalogItem = null;
+            hideModeIndicator();
+            updateSidebarSelection(null);
+        }
+
+        function startGrab(obj, hitPoint, controllerIdx) {
+            state.mode = 'grabbed';
+            state.grabbedObject = obj;
+            state.grabControllerIdx = controllerIdx;
+            state.grabDistance = 2.0;
+            showModeIndicator('Moving — thumbstick to rotate');
+        }
+
+        function endGrab() {
+            state.mode = 'idle';
+            state.grabbedObject = null;
+            state.grabControllerIdx = null;
+            hideModeIndicator();
+        }
+
+        function deleteObject(obj) {
+            clearHover();
+            placedGroup.remove(obj);
+            const idx = state.placedObjects.indexOf(obj);
+            if (idx >= 0) state.placedObjects.splice(idx, 1);
+            obj.traverse(c => { if (c.isMesh) { c.geometry?.dispose(); c.material?.dispose(); } });
+            log(`Deleted (${state.placedObjects.length} remaining)`);
+        }
+
+        // ======================== UI Helpers ========================
+        function showModeIndicator(t) { const e = document.getElementById('mode-indicator'); e.textContent = t; e.style.display = 'block'; }
+        function hideModeIndicator() { document.getElementById('mode-indicator').style.display = 'none'; }
+        function updateSidebarSelection(id) { document.querySelectorAll('.catalog-card').forEach(c => c.classList.toggle('selected', c.dataset.id === id)); }
+
+        // ======================== Vector Search ========================
+        async function searchCatalog(query) {
+            if (!query.trim()) return;
+            log(`Searching: "${query}"...`);
+            document.getElementById('sidebar-items').innerHTML = '<div class="status-msg">Searching...</div>';
+            try {
+                const resp = await fetch('/api/libraries/search', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query: query.trim(), mode: 'vector', status: 'ready', limit: 12 }),
+                });
+                const data = await resp.json();
+                state.searchResults = (data.success && data.results) ? data.results.map(i => ({
+                    id: i.id, description: i.description,
+                    image_url: i.image_url || '', asset_url: i.asset_url || '',
+                    similarity: i.similarity,
+                })) : [];
+                log(`Found ${state.searchResults.length} objects`);
+            } catch (e) {
+                log('Search failed: ' + e.message);
+                state.searchResults = [];
+            }
+            renderSidebarResults();
+        }
+
+        function renderSidebarResults() {
+            const container = document.getElementById('sidebar-items');
+            container.innerHTML = '';
+            const items = state.searchResults.filter(i => i.asset_url);
+            if (items.length === 0) { container.innerHTML = '<div class="status-msg">No results.</div>'; return; }
+            for (const item of items) {
+                const card = document.createElement('div');
+                card.className = 'catalog-card';
+                card.dataset.id = item.id;
+                card.innerHTML = `<img src="${item.image_url}" alt="${item.description}" loading="lazy"><div class="label">${item.description || 'Object'}</div>${item.similarity ? `<div class="similarity">${(item.similarity * 100).toFixed(0)}% match</div>` : ''}`;
+                card.addEventListener('click', () => {
+                    if (state.mode === 'placing' && state.selectedCatalogItem?.id === item.id) cancelPlacement();
+                    else selectCatalogItem(item);
+                });
+                container.appendChild(card);
+            }
+        }
+
+        document.getElementById('search-btn').addEventListener('click', () => searchCatalog(document.getElementById('search-input').value));
+        document.getElementById('search-input').addEventListener('keydown', e => { if (e.key === 'Enter') searchCatalog(e.target.value); });
+
+        // ======================== Desktop Mouse ========================
+        const mouse = new THREE.Vector2();
+        const drc = new THREE.Raycaster();
+        let isDragging = false, dragObj = null, rightDragObj = null, rightDragStartX = 0, rightDragStartRot = 0;
+
+        renderer.domElement.addEventListener('mousemove', (e) => {
+            const r = renderer.domElement.getBoundingClientRect();
+            mouse.x = ((e.clientX - r.left) / r.width) * 2 - 1;
+            mouse.y = -((e.clientY - r.top) / r.height) * 2 + 1;
+            if (isDragging && dragObj) { drc.setFromCamera(mouse, camera); const g = findGroundHit(drc); if (g) { dragObj.position.x = g.x; dragObj.position.z = g.z; } return; }
+            if (rightDragObj) { rightDragObj.rotation.y = rightDragStartRot + (e.clientX - rightDragStartX) * 0.01; return; }
+            if (state.mode === 'idle') { drc.setFromCamera(mouse, camera); setHover(findPlacedObjectHit(drc)?.object || null); }
+            if (state.mode === 'placing' && state.ghostMesh) { drc.setFromCamera(mouse, camera); const g = findGroundHit(drc); if (g) { state.ghostMesh.position.set(g.x, 0, g.z); state.ghostMesh.visible = true; } }
+        });
+
+        renderer.domElement.addEventListener('mousedown', (e) => {
+            if (e.button === 2 && hoveredObject) { rightDragObj = hoveredObject; rightDragStartX = e.clientX; rightDragStartRot = hoveredObject.rotation.y; controls.enabled = false; e.preventDefault(); return; }
+            if (e.button !== 0) return;
+            drc.setFromCamera(mouse, camera);
+            if (state.mode === 'placing') { const g = findGroundHit(drc); if (g) placeObject(g); return; }
+            if (state.mode === 'idle') { const h = findPlacedObjectHit(drc); if (h) { isDragging = true; dragObj = h.object; controls.enabled = false; showModeIndicator('Moving object'); } }
+        });
+
+        renderer.domElement.addEventListener('mouseup', (e) => {
+            if (e.button === 2 && rightDragObj) { rightDragObj = null; controls.enabled = true; return; }
+            if (isDragging) { isDragging = false; dragObj = null; controls.enabled = true; hideModeIndicator(); }
+        });
+
+        renderer.domElement.addEventListener('contextmenu', e => e.preventDefault());
+        window.addEventListener('keydown', e => {
+            if (e.key === 'Escape' && state.mode === 'placing') cancelPlacement();
+            if ((e.key === 'Delete' || e.key === 'Backspace') && hoveredObject && state.mode === 'idle') deleteObject(hoveredObject);
+        });
+
+        // ======================== WebXR — Manual Session Management ========================
+        const vrButton = document.getElementById('vr-button');
+
+        async function checkVR() {
+            if (!navigator.xr) { vrButton.textContent = 'WebXR Not Supported'; return; }
+            const ok = await navigator.xr.isSessionSupported('immersive-vr');
+            if (ok) {
+                vrButton.textContent = 'Enter VR';
+                vrButton.disabled = false;
+                vrButton.onclick = enterVR;
+            } else {
+                vrButton.textContent = 'No VR Headset';
+            }
+        }
+
+        async function enterVR() {
+            log('Entering VR...');
+            try {
+                xrSession = await navigator.xr.requestSession('immersive-vr', {
+                    optionalFeatures: ['local-floor']
+                });
+
+                xrGLLayer = new XRWebGLLayer(xrSession, gl);
+                xrSession.updateRenderState({ baseLayer: xrGLLayer });
+                log(`XRWebGLLayer: ${xrGLLayer.framebufferWidth}x${xrGLLayer.framebufferHeight}`);
+
+                try {
+                    xrRefSpace = await xrSession.requestReferenceSpace('local-floor');
+                } catch (_) {
+                    xrRefSpace = await xrSession.requestReferenceSpace('local');
+                }
+
+                state.isVR = true;
+                document.getElementById('sidebar').classList.add('hidden');
+                vrButton.style.display = 'none';
+                xrControllerObjects.forEach(r => r.visible = true);
+
+                xrSession.addEventListener('end', () => {
+                    log('VR session ended');
+                    state.isVR = false;
+                    xrSession = null;
+                    xrRefSpace = null;
+                    xrGLLayer = null;
+                    xrControllers[0] = xrControllers[1] = null;
+                    xrControllerObjects.forEach(r => r.visible = false);
+                    document.getElementById('sidebar').classList.remove('hidden');
+                    vrButton.style.display = 'block';
+                    renderer.setSize(window.innerWidth - sidebarWidth, window.innerHeight);
+                    // Restart desktop loop
+                    requestAnimationFrame(desktopFrame);
+                });
+
+                xrSession.addEventListener('inputsourceschange', (e) => {
+                    for (const src of e.added) log(`Controller: ${src.handedness} ${src.targetRayMode}`);
+                    updateXRInputSources();
+                });
+
+                xrSession.addEventListener('selectstart', onXRSelect);
+                xrSession.addEventListener('squeezestart', onXRSqueeze);
+                xrSession.addEventListener('selectend', () => { if (state.mode === 'grabbed') endGrab(); });
+                xrSession.addEventListener('squeezeend', () => { if (state.mode === 'grabbed') endGrab(); });
+
+                // Start XR render loop
+                xrSession.requestAnimationFrame(xrFrame);
+                log('VR active!');
+            } catch (e) {
+                log('VR failed: ' + e.name + ': ' + e.message);
+                xrSession = null;
+            }
+        }
+
+        function updateXRInputSources() {
+            xrControllers[0] = xrControllers[1] = null;
+            if (!xrSession) return;
+            for (const src of xrSession.inputSources) {
+                if (src.handedness === 'left') xrControllers[0] = src;
+                else if (src.handedness === 'right') xrControllers[1] = src;
+            }
+        }
+
+        // ======================== XR Input Events ========================
+        function getControllerRayFromSource(source, frame) {
+            if (!source.gripSpace || !xrRefSpace) return null;
+            const pose = frame.getPose(source.targetRaySpace, xrRefSpace);
+            if (!pose) return null;
+            const p = pose.transform.position;
+            const o = pose.transform.orientation;
+            const origin = new THREE.Vector3(p.x, p.y, p.z);
+            const quat = new THREE.Quaternion(o.x, o.y, o.z, o.w);
+            const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(quat);
+            raycaster.set(origin, dir);
+            return raycaster;
+        }
+
+        let lastSelectFrame = null;
+        function onXRSelect(e) {
+            lastSelectFrame = e; // Will be processed in the next xrFrame
+        }
+        let lastSqueezeFrame = null;
+        function onXRSqueeze(e) {
+            lastSqueezeFrame = e;
+        }
+
+        function processXRInput(frame) {
+            if (lastSelectFrame) {
+                const src = lastSelectFrame.inputSource;
+                const rc = getControllerRayFromSource(src, frame);
+                if (rc) {
+                    if (state.mode === 'idle') {
+                        const hit = findPlacedObjectHit(rc);
+                        if (hit) {
+                            startGrab(hit.object, hit.point, src.handedness === 'left' ? 0 : 1);
+                        }
+                    }
+                    if (state.mode === 'placing') {
+                        const g = findGroundHit(rc);
+                        if (g) placeObject(g);
+                    }
+                }
+                lastSelectFrame = null;
+            }
+            if (lastSqueezeFrame) {
+                const src = lastSqueezeFrame.inputSource;
+                const rc = getControllerRayFromSource(src, frame);
+                if (rc && state.mode === 'idle') {
+                    const hit = findPlacedObjectHit(rc);
+                    if (hit) startGrab(hit.object, hit.point, src.handedness === 'left' ? 0 : 1);
+                }
+                lastSqueezeFrame = null;
+            }
+
+            // Update controller rays + thumbstick
+            for (let i = 0; i < 2; i++) {
+                const src = xrControllers[i];
+                const rayObj = xrControllerObjects[i];
+                if (!src) { rayObj.visible = false; continue; }
+
+                const pose = frame.getPose(src.targetRaySpace, xrRefSpace);
+                if (!pose) { rayObj.visible = false; continue; }
+
+                const p = pose.transform.position;
+                const o = pose.transform.orientation;
+                rayObj.position.set(p.x, p.y, p.z);
+                rayObj.quaternion.set(o.x, o.y, o.z, o.w);
+                rayObj.visible = true;
+
+                // Thumbstick
+                const gp = src.gamepad;
+                if (gp && gp.axes.length >= 4) {
+                    const tx = gp.axes[2], ty = gp.axes[3];
+                    if (state.mode === 'grabbed' && state.grabbedObject && state.grabControllerIdx === i) {
+                        if (Math.abs(tx) > 0.15) state.grabbedObject.rotation.y += tx * 0.04;
+                        if (Math.abs(ty) > 0.15) state.grabDistance = Math.max(0.3, state.grabDistance - ty * 0.03);
+                    }
+                }
+
+                // Move grabbed object
+                if (state.mode === 'grabbed' && state.grabbedObject && state.grabControllerIdx === i) {
+                    const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(rayObj.quaternion);
+                    const target = rayObj.position.clone().add(dir.multiplyScalar(state.grabDistance));
+                    state.grabbedObject.position.lerp(target, 0.3);
+                }
+
+                // Hover
+                if (state.mode === 'idle') {
+                    raycaster.set(rayObj.position, new THREE.Vector3(0, 0, -1).applyQuaternion(rayObj.quaternion));
+                    const hit = findPlacedObjectHit(raycaster);
+                    setHover(hit ? hit.object : null);
+                    rayObj.material.color.setHex(hit ? 0x44ff44 : 0x4488ff);
+                }
+
+                // Ghost follows ground
+                if (state.mode === 'placing' && state.ghostMesh) {
+                    raycaster.set(rayObj.position, new THREE.Vector3(0, 0, -1).applyQuaternion(rayObj.quaternion));
+                    const g = findGroundHit(raycaster);
+                    if (g) { state.ghostMesh.position.set(g.x, 0, g.z); state.ghostMesh.visible = true; }
+                }
+            }
+        }
+
+        // ======================== XR Render Loop ========================
+        let vrFrameCount = 0;
+
+        function xrFrame(time, frame) {
+            xrSession.requestAnimationFrame(xrFrame);
+
+            const pose = frame.getViewerPose(xrRefSpace);
+            if (!pose) return;
+
+            vrFrameCount++;
+            if (vrFrameCount === 1) log('VR rendering!');
+
+            // Process controller input
+            processXRInput(frame);
+
+            // Render each eye
+            const glLayer = xrSession.renderState.baseLayer;
+            renderer.setRenderTarget(null); // ensure we're not rendering to an FBO
+
+            // Bind XR framebuffer once
+            gl.bindFramebuffer(gl.FRAMEBUFFER, glLayer.framebuffer);
+
+            for (const view of pose.views) {
+                const viewport = glLayer.getViewport(view);
+
+                // Set viewport AND scissor to this eye's region
+                gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
+                gl.scissor(viewport.x, viewport.y, viewport.width, viewport.height);
+                gl.enable(gl.SCISSOR_TEST);
+
+                // Set Three.js camera from XR view matrices
+                const cam = view.eye === 'left' ? vrCameraL : vrCameraR;
+                cam.matrixAutoUpdate = false;
+                cam.projectionMatrix.fromArray(view.projectionMatrix);
+                cam.projectionMatrixInverse.copy(cam.projectionMatrix).invert();
+                cam.matrixWorldInverse.fromArray(view.transform.inverse.matrix);
+                cam.matrixWorld.copy(cam.matrixWorldInverse).invert();
+
+                // Clear only this eye's region, then render
+                gl.clearColor(0.1, 0.1, 0.18, 1.0);
+                gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+                renderer.render(scene, cam);
+            }
+
+            gl.disable(gl.SCISSOR_TEST);
+        }
+
+        // ======================== Desktop Render Loop ========================
+        function desktopFrame() {
+            if (state.isVR) return;
+            controls.update();
+            renderer.clear(true, true, true);
+            renderer.render(scene, camera);
+            requestAnimationFrame(desktopFrame);
+        }
+
+        // ======================== Resize ========================
+        window.addEventListener('resize', () => {
+            if (state.isVR) return;
+            const w = window.innerWidth - sidebarWidth;
+            camera.aspect = w / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(w, window.innerHeight);
+        });
+
+        // ======================== Init ========================
+        log('Scene ready — search for objects to place');
+        checkVR();
+        requestAnimationFrame(desktopFrame);
+    </script>
+</body>
+</html>

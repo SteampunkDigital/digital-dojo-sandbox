@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>WebXR Minimal Test</title>
+    <style>
+        * { margin: 0; padding: 0; }
+        body { background: #111; color: #eee; font-family: sans-serif; }
+        canvas { display: block; }
+        #log {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            font-size: 13px;
+            max-width: 600px;
+            z-index: 10;
+            white-space: pre-wrap;
+            line-height: 1.6;
+        }
+        #enter-vr {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 14px 28px;
+            font-size: 16px;
+            background: #0e639c;
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            z-index: 10;
+        }
+        #enter-vr:disabled { background: #555; cursor: default; }
+    </style>
+</head>
+<body>
+    <div id="log"></div>
+    <button id="enter-vr" disabled>Checking VR...</button>
+
+    <script>
+        const logEl = document.getElementById('log');
+        const vrBtn = document.getElementById('enter-vr');
+
+        function log(msg) {
+            console.log(msg);
+            logEl.textContent += msg + '\n';
+        }
+
+        // ---- Canvas + WebGL ----
+        const canvas = document.createElement('canvas');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        document.body.appendChild(canvas);
+
+        const glAttrs = { xrCompatible: true, antialias: false };
+        const gl = canvas.getContext('webgl2', glAttrs) || canvas.getContext('webgl', glAttrs);
+        log('WebGL: ' + (gl ? gl.constructor.name : 'FAILED'));
+
+        canvas.addEventListener('webglcontextlost', (e) => {
+            log('CONTEXT LOST');
+            e.preventDefault();
+        });
+        canvas.addEventListener('webglcontextrestored', () => log('CONTEXT RESTORED'));
+
+        // ---- Simple render: clear to a color ----
+        let clearColor = [0.1, 0.1, 0.2, 1.0];
+
+        function renderFrame(gl, framebuffer, viewport) {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+            gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
+            gl.clearColor(...clearColor);
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        }
+
+        // Desktop render loop
+        function desktopFrame() {
+            if (xrSession) return; // VR is active, skip desktop
+            renderFrame(gl, null, { x: 0, y: 0, width: canvas.width, height: canvas.height });
+            requestAnimationFrame(desktopFrame);
+        }
+        requestAnimationFrame(desktopFrame);
+
+        // ---- WebXR ----
+        let xrSession = null;
+        let xrRefSpace = null;
+        let xrGLLayer = null;
+
+        async function checkVR() {
+            if (!navigator.xr) {
+                log('navigator.xr: NOT FOUND');
+                vrBtn.textContent = 'WebXR Not Supported';
+                return;
+            }
+            log('navigator.xr: found');
+
+            const supported = await navigator.xr.isSessionSupported('immersive-vr');
+            log('immersive-vr supported: ' + supported);
+
+            if (supported) {
+                vrBtn.textContent = 'Enter VR';
+                vrBtn.disabled = false;
+                vrBtn.onclick = enterVR;
+            } else {
+                vrBtn.textContent = 'No VR Headset';
+            }
+        }
+
+        async function enterVR() {
+            log('--- Requesting VR session ---');
+            try {
+                xrSession = await navigator.xr.requestSession('immersive-vr', {
+                    optionalFeatures: ['local-floor']
+                });
+                log('Session created');
+
+                // Create XRWebGLLayer
+                xrGLLayer = new XRWebGLLayer(xrSession, gl);
+                log('XRWebGLLayer: ' + xrGLLayer.framebufferWidth + 'x' + xrGLLayer.framebufferHeight);
+
+                // Set render state
+                xrSession.updateRenderState({ baseLayer: xrGLLayer });
+                log('Render state updated');
+
+                // Get reference space
+                try {
+                    xrRefSpace = await xrSession.requestReferenceSpace('local-floor');
+                    log('Reference space: local-floor');
+                } catch (e) {
+                    log('local-floor failed, trying local: ' + e.message);
+                    xrRefSpace = await xrSession.requestReferenceSpace('local');
+                    log('Reference space: local');
+                }
+
+                // Start XR render loop
+                xrSession.requestAnimationFrame(onXRFrame);
+                log('XR animation loop started');
+
+                vrBtn.style.display = 'none';
+
+                xrSession.addEventListener('end', () => {
+                    log('--- VR session ended ---');
+                    xrSession = null;
+                    xrRefSpace = null;
+                    xrGLLayer = null;
+                    vrBtn.style.display = 'block';
+                    requestAnimationFrame(desktopFrame);
+                });
+
+                xrSession.addEventListener('inputsourceschange', (e) => {
+                    for (const src of e.added) {
+                        log('Input added: ' + src.handedness + ' ' + src.targetRayMode);
+                    }
+                });
+
+            } catch (e) {
+                log('FAILED: ' + e.name + ': ' + e.message);
+                xrSession = null;
+            }
+        }
+
+        let frameCount = 0;
+        function onXRFrame(time, frame) {
+            const session = frame.session;
+            session.requestAnimationFrame(onXRFrame);
+
+            const pose = frame.getViewerPose(xrRefSpace);
+            if (!pose) {
+                if (frameCount === 0) log('No viewer pose yet...');
+                return;
+            }
+
+            frameCount++;
+            if (frameCount === 1) log('First pose received! Rendering...');
+            if (frameCount === 60) log('60 frames rendered OK');
+
+            const glLayer = session.renderState.baseLayer;
+
+            // Cycle clear color slowly so you can see it's alive
+            const t = time * 0.001;
+            clearColor = [
+                0.1 + 0.1 * Math.sin(t),
+                0.1 + 0.1 * Math.sin(t + 2),
+                0.3 + 0.1 * Math.sin(t + 4),
+                1.0
+            ];
+
+            for (const view of pose.views) {
+                const viewport = glLayer.getViewport(view);
+                renderFrame(gl, glLayer.framebuffer, viewport);
+            }
+
+            // Log view info once
+            if (frameCount === 1) {
+                log('Views: ' + pose.views.length);
+                for (const view of pose.views) {
+                    const vp = glLayer.getViewport(view);
+                    log('  ' + view.eye + ': ' + vp.width + 'x' + vp.height);
+                }
+            }
+        }
+
+        // ---- Init ----
+        log('WebXR Minimal Test');
+        log('Page: ' + location.href);
+        log('Secure context: ' + window.isSecureContext);
+        log('XRWebGLBinding available: ' + (typeof XRWebGLBinding !== 'undefined'));
+        log('XRWebGLLayer available: ' + (typeof XRWebGLLayer !== 'undefined'));
+        log('');
+        checkVR();
+    </script>
+</body>
+</html>

@@ -15,6 +15,7 @@ __pycache__/
 
 # SSL certs
 certs/
+*.pem
 
 # IDE
 .vscode/

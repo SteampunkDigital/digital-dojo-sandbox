@@ -1782,6 +1782,18 @@ def catalog_page():
     return render_template('catalog.html')
 
 
+@app.route('/vr')
+def vr_page():
+    """WebXR VR scene for placing catalog objects."""
+    return render_template('vr.html')
+
+
+@app.route('/vr-test')
+def vr_test_page():
+    """Minimal WebXR test - raw WebGL, no Three.js."""
+    return render_template('vr-test.html')
+
+
 @app.route('/api/catalog/items', methods=['GET'])
 def api_catalog_items():
     """
@@ -2333,6 +2345,7 @@ if __name__ == '__main__':
     print("  http://localhost:5000/editor     - Prose Editor (standalone)")
     print("  http://localhost:5000/supersplat - SuperSplat viewer (no UI)")
     print("  http://localhost:5000/chat       - Ollama Chat (debug)")
+    print("  http://localhost:5000/vr        - WebXR VR Scene Builder")
     print("")
     print("API endpoints:")
     print("  GET  /api/status        - Check service status")
@@ -2357,10 +2370,16 @@ if __name__ == '__main__':
     ssl_ctx = None
     if use_https:
         import socket
+        # Check for explicit cert/key paths from env (e.g. mkcert output)
+        env_cert = os.getenv("FLASK_SSL_CERT")
+        env_key = os.getenv("FLASK_SSL_KEY")
         cert_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'certs')
         cert_file = os.path.join(cert_dir, 'cert.pem')
         key_file = os.path.join(cert_dir, 'key.pem')
-        if os.path.exists(cert_file) and os.path.exists(key_file):
+        if env_cert and env_key and os.path.exists(env_cert) and os.path.exists(env_key):
+            ssl_ctx = (env_cert, env_key)
+            print(f"  HTTPS enabled (cert: {env_cert})")
+        elif os.path.exists(cert_file) and os.path.exists(key_file):
             ssl_ctx = (cert_file, key_file)
             print(f"  HTTPS enabled (cert: {cert_dir}/)")
         else:
