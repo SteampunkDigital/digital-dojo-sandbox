@@ -116,6 +116,52 @@
             font-size: 13px;
         }
 
+        /* Mic button */
+        #mic-btn {
+            padding: 8px 10px;
+            background: #383838;
+            color: #aaa;
+            border: none;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: background 0.15s, color 0.15s;
+            line-height: 1;
+        }
+        #mic-btn:hover { background: #444; }
+        #mic-btn.listening, #vr-mic-btn.listening {
+            background: #c62828;
+            color: #fff;
+            animation: pulse-mic 1.5s ease-in-out infinite;
+        }
+        @keyframes pulse-mic {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+        #voice-status {
+            padding: 4px 8px;
+            font-size: 11px;
+            color: #888;
+            border-bottom: 1px solid #404040;
+            display: none;
+        }
+        #voice-status.active { display: block; color: #ef5350; }
+        #vr-mic-btn {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            z-index: 30;
+            width: 56px;
+            height: 56px;
+            border-radius: 50%;
+            background: #383838;
+            color: #aaa;
+            border: 2px solid #555;
+            font-size: 22px;
+            cursor: pointer;
+            display: none;
+        }
+
         #vr-button {
             position: absolute;
             bottom: 20px;
@@ -162,14 +208,17 @@
         <div class="hint" id="hint-text">Search for objects to place in the scene</div>
     </div>
     <div id="mode-indicator"></div>
+    <button id="vr-mic-btn" title="Voice search">&#x1F399;</button>
     <button id="vr-button" disabled>VR Not Available</button>
 
     <div id="sidebar">
         <div class="sidebar-header">Object Search</div>
         <div class="search-box">
             <input type="text" id="search-input" placeholder="Search objects..." />
+            <button id="mic-btn" title="Voice search">&#x1F399;</button>
             <button id="search-btn">Go</button>
         </div>
+        <div id="voice-status"></div>
         <div class="sidebar-items" id="sidebar-items">
             <div class="status-msg">Type a query to find objects</div>
         </div>
@@ -207,6 +256,24 @@
         let xrGLLayer = null;
         const xrControllers = [null, null]; // inputSource per hand
         const xrControllerObjects = []; // Three.js objects for ray visualization
+
+        // ======================== Command Context ========================
+        const commandContext = {
+            turns: [],      // Rolling buffer of {role, content} — max 6 entries
+            maxTurns: 6,
+            pendingCommand: null, // AbortController for in-flight requests
+        };
+
+        function addContextTurn(role, content) {
+            commandContext.turns.push({ role, content });
+            if (commandContext.turns.length > commandContext.maxTurns) {
+                commandContext.turns.splice(0, 2); // Drop oldest pair
+            }
+        }
+
+        // VR head tracking for scene state
+        let lastHeadPosition = new THREE.Vector3(0, 1.6, 3);
+        let lastHeadForward = new THREE.Vector3(0, 0, -1);
 
         // ======================== Renderer ========================
         // Use xrCompatible context — proven working from vr-test
@@ -257,6 +324,185 @@
         scene.add(dirLight);
         scene.add(new THREE.DirectionalLight(0xb0c0d0, 1.0).translateX(-3).translateY(-2).translateZ(-5));
 
+        // ======================== VR Floating Panel ========================
+        const vrPanel = (() => {
+            const W = 1024, H = 512;
+            const panelCanvas = document.createElement('canvas');
+            panelCanvas.width = W;
+            panelCanvas.height = H;
+            const ctx = panelCanvas.getContext('2d');
+
+            const texture = new THREE.CanvasTexture(panelCanvas);
+            texture.minFilter = THREE.LinearFilter;
+            texture.magFilter = THREE.LinearFilter;
+
+            const mesh = new THREE.Mesh(
+                new THREE.PlaneGeometry(1.0, 0.5),
+                new THREE.MeshBasicMaterial({
+                    map: texture, transparent: true, opacity: 0.95,
+                    side: THREE.DoubleSide, depthWrite: false
+                })
+            );
+            mesh.visible = false;
+            mesh.name = 'vrPanel';
+            mesh.renderOrder = 999; // Render on top
+            scene.add(mesh);
+
+            const lines = []; // {text, color}
+            let dirty = false;
+            let positioned = false;
+            let spinnerAngle = 0;
+            let spinning = false;
+
+            const HEADER_H = 48;
+            const TEXT_TOP = HEADER_H + 12;
+            const TEXT_BOTTOM = H - 16;
+            const LINE_H = 34;
+            const MAX_WIDTH = W - 40;
+            const MAX_VISIBLE_LINES = Math.floor((TEXT_BOTTOM - TEXT_TOP) / LINE_H);
+
+            function addLine(text, color = '#ffffff') {
+                lines.push({ text, color });
+                // Keep enough lines so the visible area is always full
+                while (lines.length > MAX_VISIBLE_LINES + 4) lines.shift();
+                dirty = true;
+            }
+
+            function clear() {
+                lines.length = 0;
+                dirty = true;
+            }
+
+            function setSpinner(on) {
+                if (spinning === on) return;
+                spinning = on;
+                dirty = true;
+            }
+
+            function redraw() {
+                // Animate spinner every frame when active
+                if (spinning) {
+                    spinnerAngle += 0.12;
+                    dirty = true;
+                }
+                if (!dirty) return;
+                dirty = false;
+
+                ctx.clearRect(0, 0, W, H);
+
+                // Background
+                ctx.fillStyle = 'rgba(10, 10, 25, 0.9)';
+                ctx.beginPath();
+                ctx.roundRect(4, 4, W - 8, H - 8, 16);
+                ctx.fill();
+
+                // Border
+                ctx.strokeStyle = 'rgba(100, 140, 255, 0.5)';
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.roundRect(4, 4, W - 8, H - 8, 16);
+                ctx.stroke();
+
+                // Header bar
+                ctx.fillStyle = 'rgba(60, 80, 160, 0.3)';
+                ctx.fillRect(8, 8, W - 16, HEADER_H - 8);
+                ctx.font = 'bold 24px monospace';
+                ctx.fillStyle = '#8899cc';
+                ctx.textBaseline = 'top';
+                ctx.fillText('Voice Commands', 20, 16);
+
+                // Spinner in header (right side)
+                if (spinning) {
+                    const cx = W - 40, cy = 24, r = 12;
+                    ctx.save();
+                    ctx.translate(cx, cy);
+                    ctx.rotate(spinnerAngle);
+                    ctx.beginPath();
+                    ctx.arc(0, 0, r, 0, Math.PI * 1.4);
+                    ctx.strokeStyle = '#66aaff';
+                    ctx.lineWidth = 3;
+                    ctx.lineCap = 'round';
+                    ctx.stroke();
+                    ctx.restore();
+                }
+
+                // Clip text to content region
+                ctx.save();
+                ctx.beginPath();
+                ctx.rect(8, TEXT_TOP, W - 16, TEXT_BOTTOM - TEXT_TOP);
+                ctx.clip();
+
+                // Word-wrap all lines, then render only the last N that fit
+                ctx.font = '26px monospace';
+                ctx.textBaseline = 'top';
+                const wrappedRows = [];
+                for (const line of lines) {
+                    const words = line.text.split(' ');
+                    let row = '';
+                    for (const word of words) {
+                        const test = row ? row + ' ' + word : word;
+                        if (ctx.measureText(test).width > MAX_WIDTH) {
+                            if (row) wrappedRows.push({ text: row, color: line.color });
+                            row = word;
+                        } else {
+                            row = test;
+                        }
+                    }
+                    if (row) wrappedRows.push({ text: row, color: line.color });
+                }
+
+                // Show only the tail that fits in the visible area (auto-scroll to bottom)
+                const visibleCount = Math.floor((TEXT_BOTTOM - TEXT_TOP) / LINE_H);
+                const startIdx = Math.max(0, wrappedRows.length - visibleCount);
+                let y = TEXT_TOP;
+                for (let i = startIdx; i < wrappedRows.length; i++) {
+                    ctx.fillStyle = wrappedRows[i].color;
+                    ctx.fillText(wrappedRows[i].text, 20, y);
+                    y += LINE_H;
+                }
+
+                ctx.restore();
+                texture.needsUpdate = true;
+            }
+
+            function getTargetPosition() {
+                const pos = lastHeadPosition.clone();
+                const fwd = lastHeadForward.clone();
+                fwd.y = 0;
+                if (fwd.lengthSq() < 0.001) fwd.set(0, 0, -1);
+                fwd.normalize();
+                // 1.5m in front, 0.35m below eye level
+                pos.add(fwd.multiplyScalar(1.5));
+                pos.y = lastHeadPosition.y - 0.35;
+                return pos;
+            }
+
+            function updatePosition() {
+                if (!mesh.visible) return;
+                const target = getTargetPosition();
+                if (!positioned) {
+                    // Snap to position on first frame (no lerp from origin)
+                    mesh.position.copy(target);
+                    positioned = true;
+                } else {
+                    mesh.position.lerp(target, 0.05); // Gentle follow
+                }
+                mesh.lookAt(lastHeadPosition);
+            }
+
+            function show() {
+                positioned = false; // Reset so next updatePosition snaps
+                mesh.visible = true;
+            }
+
+            function hide() {
+                mesh.visible = false;
+                positioned = false;
+            }
+
+            return { mesh, addLine, clear, setSpinner, redraw, updatePosition, show, hide };
+        })();
+
         // ======================== Ground ========================
         const gridHelper = new THREE.GridHelper(20, 40, 0x6666aa, 0x444477);
         scene.add(gridHelper);
@@ -268,16 +514,6 @@
         groundMesh.rotation.x = -Math.PI / 2;
         groundMesh.name = 'ground';
         scene.add(groundMesh);
-
-        // ======================== Debug Landmarks ========================
-        [[0, 0.075, -2, 0xff0000], [-1, 0.075, -2, 0x00ff00], [1, 0.075, -2, 0x0000ff], [0, 1.0, -3, 0xffff00]].forEach(([x, y, z, c]) => {
-            const m = new THREE.Mesh(
-                new THREE.BoxGeometry(0.15, 0.15, 0.15),
-                new THREE.MeshStandardMaterial({ color: c, emissive: c, emissiveIntensity: 0.3 })
-            );
-            m.position.set(x, y, z);
-            scene.add(m);
-        });
 
         // ======================== Controller Rays (VR) ========================
         for (let i = 0; i < 2; i++) {
@@ -462,29 +698,96 @@
         function hideModeIndicator() { document.getElementById('mode-indicator').style.display = 'none'; }
         function updateSidebarSelection(id) { document.querySelectorAll('.catalog-card').forEach(c => c.classList.toggle('selected', c.dataset.id === id)); }
 
+        // ======================== Scene State Serializer ========================
+        function buildSceneState() {
+            const objects = state.placedObjects.map((obj, i) => ({
+                index: i,
+                description: obj.userData.catalogItem?.description || 'unknown',
+                position: [
+                    Math.round(obj.position.x * 10) / 10,
+                    Math.round(obj.position.y * 10) / 10,
+                    Math.round(obj.position.z * 10) / 10
+                ],
+                rotation_y: Math.round(THREE.MathUtils.radToDeg(obj.rotation.y))
+            }));
+
+            let viewerPos, viewerForward;
+            if (state.isVR) {
+                viewerPos = [lastHeadPosition.x, lastHeadPosition.y, lastHeadPosition.z];
+                viewerForward = [lastHeadForward.x, lastHeadForward.y, lastHeadForward.z];
+            } else {
+                viewerPos = [camera.position.x, camera.position.y, camera.position.z];
+                const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+                viewerForward = [fwd.x, fwd.y, fwd.z];
+            }
+
+            return {
+                mode: state.mode,
+                objects,
+                selected: state.selectedCatalogItem?.description || null,
+                search_results: state.searchResults.map(r =>
+                    `${r.description} (${Math.round((r.similarity || 0) * 100)}%)`
+                ),
+                viewer_position: viewerPos.map(v => Math.round(v * 10) / 10),
+                viewer_forward: viewerForward.map(v => Math.round(v * 100) / 100)
+            };
+        }
+
         // ======================== Vector Search ========================
         async function searchCatalog(query) {
             if (!query.trim()) return;
             log(`Searching: "${query}"...`);
+            if (state.isVR) {
+                vrPanel.addLine(`Searching: "${query}"...`, '#ffdd66');
+                vrPanel.setSpinner(true);
+            }
             document.getElementById('sidebar-items').innerHTML = '<div class="status-msg">Searching...</div>';
             try {
+                console.log('[VR] searchCatalog fetching:', query);
                 const resp = await fetch('/api/libraries/search', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ query: query.trim(), mode: 'vector', status: 'ready', limit: 12 }),
                 });
+                console.log('[VR] searchCatalog response status:', resp.status);
                 const data = await resp.json();
+                console.log('[VR] searchCatalog data:', data);
                 state.searchResults = (data.success && data.results) ? data.results.map(i => ({
                     id: i.id, description: i.description,
                     image_url: i.image_url || '', asset_url: i.asset_url || '',
                     similarity: i.similarity,
                 })) : [];
                 log(`Found ${state.searchResults.length} objects`);
+                if (state.isVR) {
+                    vrPanel.addLine(`Found ${state.searchResults.length} results`, '#66ff88');
+                    state.searchResults.slice(0, 5).forEach((r, i) => {
+                        const pct = r.similarity ? ` (${(r.similarity * 100).toFixed(0)}%)` : '';
+                        vrPanel.addLine(`  [${i}] ${r.description}${pct}`, r.asset_url ? '#ccddff' : '#888888');
+                    });
+                }
             } catch (e) {
+                console.error('[VR] searchCatalog error:', e);
                 log('Search failed: ' + e.message);
+                if (state.isVR) vrPanel.addLine('Search failed: ' + e.message, '#ff6666');
                 state.searchResults = [];
             }
+            if (state.isVR) vrPanel.setSpinner(false);
             renderSidebarResults();
+
+            // In VR, auto-select the top result for immediate placement
+            if (state.isVR && state.searchResults.length > 0) {
+                const topResult = state.searchResults.find(i => i.asset_url);
+                if (topResult) {
+                    showModeIndicator(`Found: "${topResult.description}" (${state.searchResults.length} results)`);
+                    if (state.isVR) vrPanel.addLine(`Loading "${topResult.description}"...`, '#ffdd66');
+                    if (state.isVR) vrPanel.setSpinner(true);
+                    await selectCatalogItem(topResult);
+                    if (state.isVR) {
+                        vrPanel.setSpinner(false);
+                        vrPanel.addLine('Ready — trigger to place', '#66ff88');
+                    }
+                }
+            }
         }
 
         function renderSidebarResults() {
@@ -507,6 +810,287 @@
 
         document.getElementById('search-btn').addEventListener('click', () => searchCatalog(document.getElementById('search-input').value));
         document.getElementById('search-input').addEventListener('keydown', e => { if (e.key === 'Enter') searchCatalog(e.target.value); });
+
+        // ======================== Voice Search ========================
+        const voiceState = {
+            recognition: null,
+            isListening: false,
+            supported: false,
+            debounceTimer: null,
+            paused: false,
+        };
+
+        function pauseVoice() {
+            if (!voiceState.isListening || voiceState.paused) return;
+            voiceState.paused = true;
+            try { voiceState.recognition.abort(); } catch (_) {}
+        }
+
+        function resumeVoice() {
+            if (!voiceState.paused) return;
+            voiceState.paused = false;
+            if (voiceState.isListening) {
+                try { voiceState.recognition.start(); } catch (_) {}
+            }
+            if (state.isVR) vrPanel.addLine('Listening...', '#667799');
+        }
+
+        function initVoiceSearch() {
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (!SpeechRecognition) {
+                log('Speech recognition not supported');
+                return;
+            }
+            voiceState.supported = true;
+
+            const recognition = new SpeechRecognition();
+            recognition.continuous = true;
+            recognition.interimResults = true;
+            recognition.lang = 'en-US';
+            recognition.maxAlternatives = 1;
+
+            recognition.onstart = () => {
+                voiceState.isListening = true;
+                updateMicUI();
+                log('Listening...');
+            };
+
+            recognition.onresult = (event) => {
+                let finalTranscript = '';
+                let interimTranscript = '';
+                for (let i = event.resultIndex; i < event.results.length; i++) {
+                    const transcript = event.results[i][0].transcript;
+                    if (event.results[i].isFinal) finalTranscript += transcript;
+                    else interimTranscript += transcript;
+                }
+                if (interimTranscript) {
+                    document.getElementById('search-input').value = interimTranscript;
+                    updateVoiceStatus('Hearing: ' + interimTranscript);
+                    if (state.isVR) vrPanel.addLine('... ' + interimTranscript, '#666688');
+                }
+                if (finalTranscript) {
+                    const query = finalTranscript.trim();
+                    document.getElementById('search-input').value = query;
+                    updateVoiceStatus('Searching: ' + query);
+                    log(`Voice: "${query}"`);
+                    clearTimeout(voiceState.debounceTimer);
+                    voiceState.debounceTimer = setTimeout(() => processVoiceCommand(query), 300);
+                }
+            };
+
+            recognition.onerror = (event) => {
+                if (event.error !== 'no-speech' && event.error !== 'aborted') {
+                    log('Voice error: ' + event.error);
+                }
+                // Don't kill listening state on transient errors — let onend restart
+            };
+
+            recognition.onend = () => {
+                // Auto-restart unless intentionally stopped
+                if (voiceState.isListening && !voiceState.paused) {
+                    try { recognition.start(); } catch (_) {}
+                    return;
+                }
+                updateMicUI();
+                if (!voiceState.paused) updateVoiceStatus('');
+            };
+
+            voiceState.recognition = recognition;
+        }
+
+        function toggleVoice() {
+            if (!voiceState.supported) { log('Voice search not supported'); return; }
+            if (voiceState.isListening) {
+                voiceState.isListening = false;
+                voiceState.recognition.abort();
+                updateMicUI();
+                updateVoiceStatus('');
+                log('Mic off');
+            } else {
+                voiceState.recognition.start();
+            }
+        }
+
+        function updateMicUI() {
+            document.getElementById('mic-btn')?.classList.toggle('listening', voiceState.isListening);
+            document.getElementById('vr-mic-btn')?.classList.toggle('listening', voiceState.isListening);
+        }
+
+        function updateVoiceStatus(text) {
+            const el = document.getElementById('voice-status');
+            if (!el) return;
+            el.textContent = text;
+            el.classList.toggle('active', !!text);
+        }
+
+        document.getElementById('mic-btn').addEventListener('click', toggleVoice);
+        document.getElementById('vr-mic-btn').addEventListener('click', toggleVoice);
+        initVoiceSearch();
+
+        // ======================== Voice Command Processor ========================
+        async function processVoiceCommand(transcript) {
+            log(`Processing: "${transcript}"`);
+            updateVoiceStatus('Thinking...');
+            vrPanel.addLine('You: ' + transcript, '#aaccff');
+            vrPanel.setSpinner(true);
+            pauseVoice();
+
+            // Abort any in-flight command
+            if (commandContext.pendingCommand) commandContext.pendingCommand.abort();
+            const controller = new AbortController();
+            commandContext.pendingCommand = controller;
+
+            try {
+                // Timeout after 60s — first request may need to load model into VRAM
+                const timeout = setTimeout(() => controller.abort(), 60000);
+                console.log('[VR] Sending to /api/vr/command:', transcript);
+                const resp = await fetch('/api/vr/command', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        transcript,
+                        context: commandContext.turns,
+                        scene_state: buildSceneState()
+                    }),
+                    signal: controller.signal
+                });
+                clearTimeout(timeout);
+                const data = await resp.json();
+                console.log('[VR] Response:', data);
+                commandContext.pendingCommand = null;
+
+                if (!data.success) {
+                    vrPanel.setSpinner(false);
+                    log('Command failed, falling back to search');
+                    vrPanel.addLine('Falling back to search...', '#ffaa44');
+                    searchCatalog(transcript);
+                    resumeVoice();
+                    return;
+                }
+
+                const action = data.action;
+                addContextTurn('user', transcript);
+                addContextTurn('assistant', JSON.stringify(action));
+
+                if (action.message) {
+                    log(action.message);
+                    updateVoiceStatus(action.message);
+                    vrPanel.addLine(action.message, '#66ff88');
+                }
+
+                await executeAction(action);
+                vrPanel.setSpinner(false);
+            } catch (e) {
+                vrPanel.setSpinner(false);
+                if (e.name === 'AbortError') {
+                    vrPanel.addLine('Timed out, searching directly...', '#ffaa44');
+                    searchCatalog(transcript);
+                    resumeVoice();
+                    return;
+                }
+                console.error('[VR] Command error:', e);
+                log('LLM unavailable, searching directly');
+                vrPanel.addLine('Searching: ' + transcript, '#ffaa44');
+                searchCatalog(transcript);
+            }
+            resumeVoice();
+        }
+
+        async function executeAction(action) {
+            switch (action.action) {
+                case 'search':
+                    await searchCatalog(action.query || '');
+                    break;
+
+                case 'select': {
+                    const idx = action.index || 0;
+                    const item = state.searchResults[idx];
+                    if (item) await selectCatalogItem(item);
+                    else log(`No result at index ${idx}`);
+                    break;
+                }
+
+                case 'place':
+                    // Search first if nothing is selected and we have a query
+                    if (state.mode !== 'placing' && state.searchResults.length === 0 && action.query) {
+                        if (state.isVR) vrPanel.addLine(`Searching for "${action.query}"...`, '#ffdd66');
+                        await searchCatalog(action.query);
+                    }
+                    // Auto-select first result if nothing is selected yet
+                    if (state.mode !== 'placing' && state.searchResults.length > 0) {
+                        const item = state.searchResults.find(i => i.asset_url);
+                        if (item) await selectCatalogItem(item);
+                    }
+                    if (state.mode === 'placing' && action.position) {
+                        await placeObject(new THREE.Vector3(
+                            action.position[0], action.position[1] || 0, action.position[2]
+                        ));
+                        if (state.isVR) vrPanel.addLine('Placed!', '#66ff88');
+                    } else if (state.mode !== 'placing') {
+                        if (state.isVR) vrPanel.addLine('No object found to place', '#ff6666');
+                        log('Place failed: no object available');
+                    }
+                    break;
+
+                case 'move': {
+                    const target = resolveTarget(action.target);
+                    if (target && action.position) {
+                        target.position.set(action.position[0], 0, action.position[2]);
+                    }
+                    break;
+                }
+
+                case 'rotate': {
+                    const target = resolveTarget(action.target);
+                    if (target) {
+                        target.rotation.y += THREE.MathUtils.degToRad(action.degrees || 90);
+                    }
+                    break;
+                }
+
+                case 'scale': {
+                    const target = resolveTarget(action.target);
+                    if (target && action.factor) {
+                        target.scale.multiplyScalar(action.factor);
+                    }
+                    break;
+                }
+
+                case 'delete': {
+                    const target = resolveTarget(action.target);
+                    if (target) deleteObject(target);
+                    break;
+                }
+
+                case 'cancel':
+                    cancelPlacement();
+                    break;
+
+                case 'describe':
+                case 'none':
+                default:
+                    break;
+            }
+        }
+
+        function resolveTarget(target) {
+            if (!target) return null;
+            // Try numeric index
+            const idx = parseInt(target);
+            if (!isNaN(idx) && state.placedObjects[idx]) return state.placedObjects[idx];
+            // Try "last"
+            const lower = target.toLowerCase();
+            if (lower === 'last' || lower === 'last_placed') {
+                return state.placedObjects[state.placedObjects.length - 1] || null;
+            }
+            // Try description substring match
+            const match = state.placedObjects.find(o =>
+                (o.userData.catalogItem?.description || '').toLowerCase().includes(lower)
+            );
+            if (match) return match;
+            log(`Could not find object: "${target}"`);
+            return null;
+        }
 
         // ======================== Desktop Mouse ========================
         const mouse = new THREE.Vector2();
@@ -576,6 +1160,17 @@
 
                 state.isVR = true;
                 document.getElementById('sidebar').classList.add('hidden');
+                document.getElementById('vr-mic-btn').style.display = 'block';
+                vrPanel.clear();
+                vrPanel.addLine('Voice commands active', '#88aaff');
+                vrPanel.addLine('Speak a command or press A to toggle panel', '#667799');
+                vrPanel.redraw(); // Force initial texture paint
+                vrPanel.show();
+
+                // Auto-start voice recognition in VR
+                if (voiceState.supported && !voiceState.isListening) {
+                    try { voiceState.recognition.start(); } catch (_) {}
+                }
                 vrButton.style.display = 'none';
                 xrControllerObjects.forEach(r => r.visible = true);
 
@@ -588,6 +1183,9 @@
                     xrControllers[0] = xrControllers[1] = null;
                     xrControllerObjects.forEach(r => r.visible = false);
                     document.getElementById('sidebar').classList.remove('hidden');
+                    document.getElementById('vr-mic-btn').style.display = 'none';
+                    vrPanel.hide();
+                    if (voiceState.isListening && voiceState.recognition) voiceState.recognition.abort();
                     vrButton.style.display = 'block';
                     renderer.setSize(window.innerWidth - sidebarWidth, window.innerHeight);
                     // Restart desktop loop
@@ -645,6 +1243,9 @@
             lastSqueezeFrame = e;
         }
 
+        // Track button states for edge detection (pressed this frame, not last)
+        const prevButtons = [new Array(8).fill(false), new Array(8).fill(false)];
+
         function processXRInput(frame) {
             if (lastSelectFrame) {
                 const src = lastSelectFrame.inputSource;
@@ -698,6 +1299,21 @@
                     }
                 }
 
+                // Button edge detection (A/X = index 4, B/Y = index 5)
+                if (gp) {
+                    for (let b = 0; b < gp.buttons.length && b < 8; b++) {
+                        const pressed = gp.buttons[b].pressed;
+                        if (pressed && !prevButtons[i][b]) {
+                            // A button (right hand btn 4) or X button (left hand btn 4) — toggle panel
+                            if (b === 4) {
+                                if (vrPanel.mesh.visible) vrPanel.hide();
+                                else vrPanel.show();
+                            }
+                        }
+                        prevButtons[i][b] = pressed;
+                    }
+                }
+
                 // Move grabbed object
                 if (state.mode === 'grabbed' && state.grabbedObject && state.grabControllerIdx === i) {
                     const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(rayObj.quaternion);
@@ -733,6 +1349,21 @@
 
             vrFrameCount++;
             if (vrFrameCount === 1) log('VR rendering!');
+
+            // Track head position/forward for scene state serializer
+            const headView = pose.views[0];
+            if (headView) {
+                const hp = headView.transform.position;
+                lastHeadPosition.set(hp.x, hp.y, hp.z);
+                const ho = headView.transform.orientation;
+                lastHeadForward.set(0, 0, -1).applyQuaternion(
+                    new THREE.Quaternion(ho.x, ho.y, ho.z, ho.w)
+                );
+            }
+
+            // Update floating panel
+            vrPanel.redraw();
+            vrPanel.updatePosition();
 
             // Process controller input
             processXRInput(frame);

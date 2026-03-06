@@ -18,6 +18,7 @@ Requires:
 from flask import Flask, render_template, send_from_directory, send_file, redirect, request, jsonify
 from dotenv import load_dotenv
 import os
+import json
 import logging
 
 # Load environment variables
@@ -1794,6 +1795,111 @@ def vr_test_page():
     return render_template('vr-test.html')
 
 
+# ======================== VR Voice Command ========================
+
+VR_ACTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "action": {"type": "string", "enum": [
+            "search", "select", "place", "move", "rotate",
+            "scale", "delete", "cancel", "describe", "none"
+        ]},
+        "query": {"type": "string"},
+        "index": {"type": "integer"},
+        "position": {"type": "array", "items": {"type": "number"}},
+        "target": {"type": "string"},
+        "degrees": {"type": "number"},
+        "factor": {"type": "number"},
+        "message": {"type": "string"}
+    },
+    "required": ["action", "message"]
+}
+
+
+def build_vr_system_prompt(scene_state):
+    """Build system prompt for VR voice command interpretation."""
+    objects = scene_state.get('objects', [])
+    if objects:
+        obj_lines = '\n'.join(
+            f'  [{o["index"]}] "{o["description"]}" at ({o["position"][0]}, {o["position"][1]}, {o["position"][2]}) rot_y={o.get("rotation_y", 0)}'
+            for o in objects
+        )
+        objects_desc = f"Objects in scene:\n{obj_lines}"
+    else:
+        objects_desc = "Scene is empty."
+
+    results = scene_state.get('search_results', [])
+    search_desc = ""
+    if results:
+        search_desc = "\nRecent search results:\n" + '\n'.join(
+            f'  [{i}] {r}' for i, r in enumerate(results)
+        )
+
+    vp = scene_state.get('viewer_position', [0, 1.6, 3])
+    vf = scene_state.get('viewer_forward', [0, 0, -1])
+    mode = scene_state.get('mode', 'idle')
+    selected = scene_state.get('selected')
+
+    return f"""You interpret voice commands for a VR 3D scene builder. Output JSON actions.
+
+Current state: mode={mode}, selected={selected}
+Viewer at ({vp[0]}, {vp[1]}, {vp[2]}), facing ({vf[0]}, {vf[1]}, {vf[2]})
+{objects_desc}{search_desc}
+
+Actions you can output:
+- search: find objects in catalog. Set "query" to the search terms.
+- select: pick from search results by index. Set "index" (0-based).
+- place: place an object at a position. Set "position" [x, 0, z]. Compute from viewer position + forward direction for "in front of me". If no object is selected, also set "query" to search for one first.
+- move: reposition a placed object. Set "target" (description or "last") and "position" [x, 0, z].
+- rotate: rotate an object around Y axis. Set "target" and "degrees".
+- scale: resize an object. Set "target" and "factor" (e.g. 2.0 = double size).
+- delete: remove an object. Set "target".
+- cancel: cancel current placement.
+- describe: narrate the scene. Put description in "message".
+- none: command not understood.
+
+Always set "message" to a brief spoken response for the user.
+Resolve spatial language to concrete [x, 0, z] coordinates using viewer position, forward direction, and object positions."""
+
+
+@app.route('/api/vr/command', methods=['POST'])
+def api_vr_command():
+    """Process a voice command through LLM for VR scene manipulation."""
+    data = request.get_json()
+    transcript = (data.get('transcript') or '').strip()
+    context = data.get('context', [])
+    scene_state = data.get('scene_state', {})
+
+    if not transcript:
+        return jsonify({"error": "No transcript", "success": False}), 400
+
+    ollama = get_ollama()
+    if not ollama or not ollama.is_available():
+        return jsonify({
+            "action": {"action": "search", "query": transcript, "message": f"Searching: {transcript}"},
+            "success": True,
+            "fallback": True
+        })
+
+    # Build message list: system + context + current transcript
+    messages = [{"role": "system", "content": build_vr_system_prompt(scene_state)}]
+    for turn in context[-6:]:
+        messages.append({"role": turn.get("role", "user"), "content": turn.get("content", "")})
+    messages.append({"role": "user", "content": transcript})
+
+    try:
+        result = ollama.chat(messages, temperature=0.3, format_schema=VR_ACTION_SCHEMA)
+        action_data = json.loads(result)
+        return jsonify({"action": action_data, "success": True})
+    except Exception as e:
+        logger.error(f"VR command failed: {e}")
+        return jsonify({
+            "action": {"action": "search", "query": transcript, "message": transcript},
+            "success": True,
+            "fallback": True
+        })
+
+
 @app.route('/api/catalog/items', methods=['GET'])
 def api_catalog_items():
     """
@@ -2440,4 +2546,17 @@ if __name__ == '__main__':
             print("  (Accept the browser security warning on first visit)")
             print("")
 
-    app.run(debug=debug, host='0.0.0.0', port=port, ssl_context=ssl_ctx)
+    # Warm up Ollama model so first VR command isn't slow
+    import threading
+    def _warmup_ollama():
+        try:
+            o = get_ollama()
+            if o and o.is_available():
+                print("  Warming up Ollama model...")
+                o.chat([{"role": "user", "content": "hi"}], temperature=0)
+                print("  Ollama model ready.")
+        except Exception as e:
+            print(f"  Ollama warmup skipped: {e}")
+    threading.Thread(target=_warmup_ollama, daemon=True).start()
+
+    app.run(debug=debug, host='0.0.0.0', port=port, ssl_context=ssl_ctx, threaded=True)
