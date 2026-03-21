@@ -112,7 +112,10 @@ class OpenCLIPBackend(BaseEmbeddingBackend):
 
         tokens = self.tokenizer([text]).to(self.device)
 
-        with torch.no_grad(), torch.amp.autocast(self.device):
+        # Keep text encoding in fp32 to avoid intermittent fp16/cuBLAS failures
+        # seen with some Torch/OpenCLIP/CUDA combinations.
+        # This is really quick.
+        with torch.no_grad():
             text_features = self.model.encode_text(tokens)
             text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
@@ -275,7 +278,8 @@ class FLAIRBackend(BaseEmbeddingBackend):
         # OpenCLIP fallback path
         if getattr(self, '_using_openclip_fallback', False):
             tokens = self.tokenizer([text]).to(self.device)
-            with torch.no_grad(), torch.amp.autocast(self.device):
+            # Match the OpenCLIP backend: text encoding is more stable in fp32.
+            with torch.no_grad():
                 text_features = self.model.encode_text(tokens)
                 text_features = text_features / text_features.norm(dim=-1, keepdim=True)
             return text_features[0].cpu().numpy().tolist()
